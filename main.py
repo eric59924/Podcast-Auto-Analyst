@@ -40,18 +40,40 @@ UNRESTRICTED_SAFETY = [
 # =========================
 def get_latest_episode_from_rss(rss_url):
     print("📡 正在檢查 Podcast RSS 更新...")
-    headers  = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    response = requests.get(rss_url, headers=headers, timeout=15)
-    if response.status_code != 200:
-        raise Exception(f"RSS 抓取失敗，狀態碼: {response.status_code}")
+    
+    # ✅ 模擬完整的瀏覽器請求頭，避免被 Firstory 擋掉
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache',
+    }
+    
+    # ✅ 加入 retry 機制，失敗最多重試 3 次
+    for attempt in range(3):
+        try:
+            response = requests.get(rss_url, headers=headers, timeout=20)
+            print(f"   HTTP 狀態碼：{response.status_code}")
+            
+            if response.status_code == 200:
+                break
+            elif response.status_code == 403:
+                print(f"   ⚠️ 第 {attempt+1} 次被擋，等待後重試...")
+                time.sleep(5)
+            else:
+                raise Exception(f"RSS 抓取失敗，狀態碼: {response.status_code}")
+        except requests.exceptions.Timeout:
+            print(f"   ⚠️ 第 {attempt+1} 次逾時，重試中...")
+            time.sleep(5)
+    else:
+        raise Exception("❌ RSS 抓取失敗，重試 3 次後仍被拒絕（403）")
 
     root        = ET.fromstring(response.content)
     latest_item = root.find('.//channel/item')
-
-    title   = latest_item.find('title').text
-    mp3_url = latest_item.find('enclosure').attrib['url']
-
-    # ✅ 新增：從 RSS 擷取發布日期，傳給 Gemini 幫助填 date 欄位
+    title       = latest_item.find('title').text
+    mp3_url     = latest_item.find('enclosure').attrib['url']
     pub_date_raw = latest_item.findtext('pubDate', default='')
 
     match      = re.search(r"(EP\d+)", title, re.IGNORECASE)
@@ -59,8 +81,7 @@ def get_latest_episode_from_rss(rss_url):
 
     print(f"   最新集數：{episode_no}  |  發布時間：{pub_date_raw}")
     return episode_no, title, mp3_url, pub_date_raw
-
-
+    
 # =========================
 # 📝 模組 2：音檔 → 逐字稿
 # =========================
