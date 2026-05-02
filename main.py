@@ -10,8 +10,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from google import genai
 from google.genai import types
-import feedparser
-
 
 # =========================
 # ⚙️ 設定區（從環境變數讀取）
