@@ -2,22 +2,8 @@ name: Podcast Auto Analyst
 
 on:
   schedule:
-    # ──────────────────────────────────────────
-    # 📅 每週三 台灣時間 08:00-12:45，每 15 分鐘掃一次
-    # 台灣 UTC+8，所以 08:00-12:45 台灣 = 00:00-04:45 UTC
-    # ──────────────────────────────────────────
     - cron: '0,15,30,45 0,1,2,3,4 * * 3'
-
-    # ──────────────────────────────────────────
-    # 📅 每週三 台灣時間 13:00 之後，每小時掃一次
-    # 13:00 台灣 = 05:00 UTC
-    # ──────────────────────────────────────────
     - cron: '0 5-23 * * 3'
-
-    # ──────────────────────────────────────────
-    # 📅 每週六 台灣時間 12:00 開始，每小時掃一次
-    # 12:00 台灣 = 04:00 UTC
-    # ──────────────────────────────────────────
     - cron: '0 4-23 * * 6'
 
   workflow_dispatch:
@@ -31,6 +17,9 @@ on:
           - 'false'
           - 'true'
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # ✅ 直接升級到 Node.js 24，消除警告
+
 permissions:
   contents: write
 
@@ -40,10 +29,10 @@ jobs:
 
     steps:
       - name: 1. 檢出程式碼
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2        # ✅ 升級到支援 Node 24 的版本
 
       - name: 2. 設定 Python 環境
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0    # ✅ 升級到支援 Node 24 的版本
         with:
           python-version: '3.11'
 
