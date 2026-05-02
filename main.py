@@ -41,35 +41,72 @@ UNRESTRICTED_SAFETY = [
 def get_latest_episode_from_rss(rss_url):
     print("📡 正在透過 RSS 代理抓取最新集數...")
 
-    # ✅ 用 rss2json 當代理，繞過 S3 的 IP 封鎖
-    api_url  = f"https://api.rss2json.com/v1/api.json?rss_url={requests.utils.quote(rss_url, safe='')}"
-    headers  = {'User-Agent': 'Mozilla/5.0'}
-    response = requests.get(api_url, headers=headers, timeout=20)
+    encoded_url = requests.utils.quote(rss_url, safe='')
 
-    print(f"   rss2json 狀態碼: {response.status_code}")
+    # ✅ 多個代理輪流嘗試，任一成功即停止
+    proxies = [
+        {
+            "name": "allorigins",
+            "url": f"https://api.allorigins.win/get?url={encoded_url}",
+            "parse": lambda r: r.json().get("contents", "")
+        },
+        {
+            "name": "rss2json",
+            "url": f"https://api.rss2json.com/v1/api.json?rss_url={encoded_url}",
+            "parse": None   # rss2json 單獨處理
+        },
+    ]
 
-    if response.status_code != 200:
-        raise Exception(f"❌ rss2json 請求失敗，狀態碼: {response.status_code}")
+    xml_content = None
 
-    data   = response.json()
-    status = data.get('status')
-    print(f"   rss2json 解析狀態: {status}")
+    for proxy in proxies:
+        try:
+            print(f"   嘗試代理：{proxy['name']}...")
+            r = requests.get(proxy["url"], timeout=20,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            print(f"   狀態碼：{r.status_code}")
 
-    if status != 'ok':
-        raise Exception(f"❌ rss2json 解析失敗: {data.get('message', '未知錯誤')}")
+            if r.status_code != 200:
+                continue
 
-    items = data.get('items', [])
-    if not items:
-        raise Exception("❌ RSS 沒有任何集數")
+            # rss2json 直接回傳 JSON 格式，單獨處理
+            if proxy["name"] == "rss2json":
+                data   = r.json()
+                if data.get("status") != "ok":
+                    print(f"   rss2json 解析失敗：{data.get('message')}")
+                    continue
+                items        = data.get("items", [])
+                latest       = items[0]
+                title        = latest.get("title", "")
+                mp3_url      = latest.get("enclosure", {}).get("link", "") or latest.get("link", "")
+                pub_date_raw = latest.get("pubDate", "")
+                match        = re.search(r"(EP\d+)", title, re.IGNORECASE)
+                episode_no   = match.group(1).upper() if match else "LATEST_EP"
+                print(f"✅ 集數：{episode_no}  |  {pub_date_raw}")
+                return episode_no, title, mp3_url, pub_date_raw
 
-    latest       = items[0]
-    title        = latest.get('title', '')
-    mp3_url      = latest.get('enclosure', {}).get('link', '') or latest.get('link', '')
-    pub_date_raw = latest.get('pubDate', '')
+            # 其他代理回傳原始 XML
+            xml_content = proxy["parse"](r)
+            if xml_content and "<item>" in xml_content:
+                print(f"   ✅ {proxy['name']} 成功取得 XML")
+                break
+            else:
+                print(f"   {proxy['name']} 回傳內容異常，嘗試下一個")
+                xml_content = None
 
-    print(f"   標題: {title}")
-    print(f"   MP3: {mp3_url[:60]}...")
-    print(f"   發布時間: {pub_date_raw}")
+        except Exception as e:
+            print(f"   {proxy['name']} 失敗：{e}")
+            continue
+
+    if not xml_content:
+        raise Exception("❌ 所有代理均失敗，無法取得 RSS")
+
+    # 解析 XML
+    root         = ET.fromstring(xml_content)
+    latest_item  = root.find('.//channel/item')
+    title        = latest_item.find('title').text
+    mp3_url      = latest_item.find('enclosure').attrib['url']
+    pub_date_raw = latest_item.findtext('pubDate', default='')
 
     if not mp3_url:
         raise Exception("❌ 找不到 MP3 連結")
