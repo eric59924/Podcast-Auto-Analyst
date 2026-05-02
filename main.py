@@ -43,20 +43,30 @@ UNRESTRICTED_SAFETY = [
 def get_latest_episode_from_rss(rss_url):
     print("📡 正在檢查 Podcast RSS 更新...")
     
-    # feedparser 內建 User-Agent 偽裝，成功率更高
     feed = feedparser.parse(rss_url)
     
-    if feed.bozo and not feed.entries:
-        raise Exception(f"❌ RSS 解析失敗：{feed.bozo_exception}")
+    # ✅ 加入診斷輸出，看看 feedparser 拿到什麼
+    print(f"   feed.status: {getattr(feed, 'status', 'N/A')}")
+    print(f"   feed.bozo: {feed.bozo}")
+    print(f"   feed.entries 數量: {len(feed.entries)}")
+    print(f"   feed.feed keys: {list(feed.feed.keys()) if feed.feed else '空的'}")
     
+    # ✅ 若 feedparser 拿不到，改用 requests 直接抓原始 XML 看內容
     if not feed.entries:
-        raise Exception("❌ RSS 沒有任何集數")
+        print("   ⚠️ feedparser 無結果，改用 requests 直接抓 RSS...")
+        headers = {
+            'User-Agent': 'podcatcher/1.0',   # 某些 RSS 對 podcast app UA 更友善
+            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+        }
+        r = requests.get(rss_url, headers=headers, timeout=20)
+        print(f"   requests 狀態碼: {r.status_code}")
+        print(f"   回應前 500 字: {r.text[:500]}")
+        raise Exception("❌ RSS 沒有任何集數，請看上方診斷輸出")
     
-    latest      = feed.entries[0]
-    title       = latest.get('title', '')
+    latest       = feed.entries[0]
+    title        = latest.get('title', '')
     pub_date_raw = latest.get('published', '')
     
-    # 找 mp3 連結
     mp3_url = None
     for enclosure in latest.get('enclosures', []):
         if 'audio' in enclosure.get('type', ''):
@@ -64,6 +74,8 @@ def get_latest_episode_from_rss(rss_url):
             break
     
     if not mp3_url:
+        # ✅ 找不到時印出 enclosures 內容幫助診斷
+        print(f"   enclosures 原始內容: {latest.get('enclosures', [])}")
         raise Exception("❌ 找不到 MP3 連結")
 
     match      = re.search(r"(EP\d+)", title, re.IGNORECASE)
