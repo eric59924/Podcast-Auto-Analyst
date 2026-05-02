@@ -10,6 +10,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from google import genai
 from google.genai import types
+import feedparser
+
 
 # =========================
 # ⚙️ 設定區（從環境變數讀取）
@@ -41,40 +43,28 @@ UNRESTRICTED_SAFETY = [
 def get_latest_episode_from_rss(rss_url):
     print("📡 正在檢查 Podcast RSS 更新...")
     
-    # ✅ 模擬完整的瀏覽器請求頭，避免被 Firstory 擋掉
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache',
-    }
+    # feedparser 內建 User-Agent 偽裝，成功率更高
+    feed = feedparser.parse(rss_url)
     
-    # ✅ 加入 retry 機制，失敗最多重試 3 次
-    for attempt in range(3):
-        try:
-            response = requests.get(rss_url, headers=headers, timeout=20)
-            print(f"   HTTP 狀態碼：{response.status_code}")
-            
-            if response.status_code == 200:
-                break
-            elif response.status_code == 403:
-                print(f"   ⚠️ 第 {attempt+1} 次被擋，等待後重試...")
-                time.sleep(5)
-            else:
-                raise Exception(f"RSS 抓取失敗，狀態碼: {response.status_code}")
-        except requests.exceptions.Timeout:
-            print(f"   ⚠️ 第 {attempt+1} 次逾時，重試中...")
-            time.sleep(5)
-    else:
-        raise Exception("❌ RSS 抓取失敗，重試 3 次後仍被拒絕（403）")
-
-    root        = ET.fromstring(response.content)
-    latest_item = root.find('.//channel/item')
-    title       = latest_item.find('title').text
-    mp3_url     = latest_item.find('enclosure').attrib['url']
-    pub_date_raw = latest_item.findtext('pubDate', default='')
+    if feed.bozo and not feed.entries:
+        raise Exception(f"❌ RSS 解析失敗：{feed.bozo_exception}")
+    
+    if not feed.entries:
+        raise Exception("❌ RSS 沒有任何集數")
+    
+    latest      = feed.entries[0]
+    title       = latest.get('title', '')
+    pub_date_raw = latest.get('published', '')
+    
+    # 找 mp3 連結
+    mp3_url = None
+    for enclosure in latest.get('enclosures', []):
+        if 'audio' in enclosure.get('type', ''):
+            mp3_url = enclosure.get('href') or enclosure.get('url')
+            break
+    
+    if not mp3_url:
+        raise Exception("❌ 找不到 MP3 連結")
 
     match      = re.search(r"(EP\d+)", title, re.IGNORECASE)
     episode_no = match.group(1).upper() if match else "LATEST_EP"
