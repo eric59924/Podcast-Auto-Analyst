@@ -1,24 +1,32 @@
 name: Podcast Auto Analyst
 
 on:
-  schedule:
-    - cron: '0,15,30,45 0,1,2,3,4 * * 3'
-    - cron: '0 5-23 * * 3'
-    - cron: '0 4-23 * * 6'
+  repository_dispatch:
+    types: [new_episode]
 
   workflow_dispatch:
     inputs:
+      episode_no:
+        description: '集數編號，如 EP657'
+        required: false
+        default: ''
+      mp3_url:
+        description: 'MP3 網址'
+        required: false
+        default: ''
+      pub_date:
+        description: '發布日期'
+        required: false
+        default: ''
       force_rerun:
-        description: '強制重新分析（忽略已處理快取）'
+        description: '強制重新分析'
         required: false
         default: 'false'
         type: choice
-        options:
-          - 'false'
-          - 'true'
+        options: ['false', 'true']
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # ✅ 直接升級到 Node.js 24，消除警告
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: write
@@ -26,29 +34,28 @@ permissions:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-
     steps:
-      - name: 1. 檢出程式碼
-        uses: actions/checkout@v4.2.2        # ✅ 升級到支援 Node 24 的版本
-
-      - name: 2. 設定 Python 環境
-        uses: actions/setup-python@v5.6.0    # ✅ 升級到支援 Node 24 的版本
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.11'
 
-      - name: 3. 安裝依賴套件
+      - name: 安裝套件
         run: pip install -r requirements.txt
 
-      - name: 4. 執行分析主程式
+      - name: 執行分析
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GMAIL_USER:     ${{ secrets.GMAIL_USER }}
           GMAIL_PASS:     ${{ secrets.GMAIL_PASS }}
           EMAIL_TO:       ${{ secrets.EMAIL_TO }}
-          FORCE_RERUN:    ${{ github.event.inputs.force_rerun || 'false' }}
+          EPISODE_NO:     ${{ github.event.client_payload.episode_no  || github.event.inputs.episode_no }}
+          MP3_URL:        ${{ github.event.client_payload.mp3_url     || github.event.inputs.mp3_url }}
+          PUB_DATE:       ${{ github.event.client_payload.pub_date    || github.event.inputs.pub_date }}
+          FORCE_RERUN:    ${{ github.event.client_payload.force_rerun || github.event.inputs.force_rerun || 'false' }}
         run: python main.py
 
-      - name: 5. 存回已處理紀錄與分析結果
+      - name: 存回紀錄
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Auto update: processed episode"
