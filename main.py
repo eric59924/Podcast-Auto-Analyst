@@ -41,47 +41,45 @@ UNRESTRICTED_SAFETY = [
 # 📡 模組 1：抓取最新 RSS
 # =========================
 def get_latest_episode_from_rss(rss_url):
-    print("📡 正在檢查 Podcast RSS 更新...")
-    
-    feed = feedparser.parse(rss_url)
-    
-    # ✅ 加入診斷輸出，看看 feedparser 拿到什麼
-    print(f"   feed.status: {getattr(feed, 'status', 'N/A')}")
-    print(f"   feed.bozo: {feed.bozo}")
-    print(f"   feed.entries 數量: {len(feed.entries)}")
-    print(f"   feed.feed keys: {list(feed.feed.keys()) if feed.feed else '空的'}")
-    
-    # ✅ 若 feedparser 拿不到，改用 requests 直接抓原始 XML 看內容
-    if not feed.entries:
-        print("   ⚠️ feedparser 無結果，改用 requests 直接抓 RSS...")
-        headers = {
-            'User-Agent': 'podcatcher/1.0',   # 某些 RSS 對 podcast app UA 更友善
-            'Accept': 'application/rss+xml, application/xml, text/xml, */*',
-        }
-        r = requests.get(rss_url, headers=headers, timeout=20)
-        print(f"   requests 狀態碼: {r.status_code}")
-        print(f"   回應前 500 字: {r.text[:500]}")
-        raise Exception("❌ RSS 沒有任何集數，請看上方診斷輸出")
-    
-    latest       = feed.entries[0]
+    print("📡 正在透過 RSS 代理抓取最新集數...")
+
+    # ✅ 用 rss2json 當代理，繞過 S3 的 IP 封鎖
+    api_url  = f"https://api.rss2json.com/v1/api.json?rss_url={requests.utils.quote(rss_url, safe='')}"
+    headers  = {'User-Agent': 'Mozilla/5.0'}
+    response = requests.get(api_url, headers=headers, timeout=20)
+
+    print(f"   rss2json 狀態碼: {response.status_code}")
+
+    if response.status_code != 200:
+        raise Exception(f"❌ rss2json 請求失敗，狀態碼: {response.status_code}")
+
+    data   = response.json()
+    status = data.get('status')
+    print(f"   rss2json 解析狀態: {status}")
+
+    if status != 'ok':
+        raise Exception(f"❌ rss2json 解析失敗: {data.get('message', '未知錯誤')}")
+
+    items = data.get('items', [])
+    if not items:
+        raise Exception("❌ RSS 沒有任何集數")
+
+    latest       = items[0]
     title        = latest.get('title', '')
-    pub_date_raw = latest.get('published', '')
-    
-    mp3_url = None
-    for enclosure in latest.get('enclosures', []):
-        if 'audio' in enclosure.get('type', ''):
-            mp3_url = enclosure.get('href') or enclosure.get('url')
-            break
-    
+    mp3_url      = latest.get('enclosure', {}).get('link', '') or latest.get('link', '')
+    pub_date_raw = latest.get('pubDate', '')
+
+    print(f"   標題: {title}")
+    print(f"   MP3: {mp3_url[:60]}...")
+    print(f"   發布時間: {pub_date_raw}")
+
     if not mp3_url:
-        # ✅ 找不到時印出 enclosures 內容幫助診斷
-        print(f"   enclosures 原始內容: {latest.get('enclosures', [])}")
         raise Exception("❌ 找不到 MP3 連結")
 
     match      = re.search(r"(EP\d+)", title, re.IGNORECASE)
     episode_no = match.group(1).upper() if match else "LATEST_EP"
 
-    print(f"   最新集數：{episode_no}  |  發布時間：{pub_date_raw}")
+    print(f"✅ 集數：{episode_no}  |  發布時間：{pub_date_raw}")
     return episode_no, title, mp3_url, pub_date_raw
     
 # =========================
