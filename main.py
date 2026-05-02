@@ -490,7 +490,16 @@ def main():
     print(f"   FORCE_RERUN = {FORCE_RERUN}")
 
     # 1. 抓取最新集數（含發布日期）
-    episode_no, rss_title, mp3_url, pub_date_raw = get_latest_episode_from_rss(RSS_URL)
+    episode_no   = os.environ.get("EPISODE_NO", "").strip()
+    mp3_url      = os.environ.get("MP3_URL", "").strip()
+    pub_date_raw = os.environ.get("PUB_DATE", "").strip()
+    rss_title    = episode_no
+    
+    if not episode_no or not mp3_url:
+        print("❌ 缺少 EPISODE_NO 或 MP3_URL")
+        sys.exit(1)
+    
+    print(f"📻 收到集數：{episode_no}  |  {pub_date_raw}")
 
     # 2. 防重複：已處理過且非強制重跑 → 直接結束
     last_ep = ""
