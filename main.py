@@ -349,11 +349,9 @@ def analyze_from_transcript(transcript_text, pub_date_raw, episode_no):
 # 💌 模組 4：JSON → HTML Email
 # =========================
 def generate_html_email(data):
-    episode_str = data.get('episode') or ""
-    date_str    = data.get('date')    or "最新市場快訊"
-    title_str   = data.get('title')   or "市場重點整理"
-
-    header_label = f"{episode_str}  {date_str}".strip() if episode_str else date_str
+    # ✅ 移除 episode_str，JSON 已不含此欄位
+    date_str  = data.get('date') or "最新市場快訊"
+    title_str = data.get('title') or "市場重點整理"
 
     html = f"""
 <html>
@@ -362,24 +360,24 @@ def generate_html_email(data):
 
   <!-- Header -->
   <div style="border-bottom:2px solid #eee;padding-bottom:15px;margin-bottom:20px;">
-    <span style="background:#3498db;color:#fff;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:13px;">{header_label}</span>
+    <span style="background:#3498db;color:#fff;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:13px;">{date_str}</span>
     <h2 style="margin:10px 0 0;color:#2c3e50;font-size:20px;">{title_str}</h2>
   </div>
 
   <!-- 導讀 -->
   <div style="background:#f8f9fa;border-left:4px solid #f39c12;padding:15px;border-radius:4px;margin-bottom:25px;">
-    <h4 style="margin:0 0 8px;color:#f39c12;font-size:14px;">💡 核心摘要</h4>
+    <h4 style="margin:0 0 8px;color:#f39c12;font-size:14px;">💡 本週市場摘要</h4>
     <p style="margin:0;line-height:1.7;font-size:14px;color:#555;">{data.get('intro','')}</p>
   </div>
 """
 
     # 大盤觀點
-    market      = data.get('market_view', {})
-    sentiment   = market.get('sentiment', '中性')
-    mkt_color   = {"看多": "#27ae60", "看空": "#c0392b"}.get(sentiment, "#7f8c8d")
-    dot_bg      = {"看多": "#eaf6ee", "看空": "#fdecea"}.get(sentiment, "#f0f0f0")
+    market    = data.get('market_view', {})
+    sentiment = market.get('sentiment', '中性')
+    mkt_color = {"看多": "#27ae60", "看空": "#c0392b"}.get(sentiment, "#7f8c8d")
+    dot_bg    = {"看多": "#eaf6ee", "看空": "#fdecea"}.get(sentiment, "#f0f0f0")
     html += f"""
-  <h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;font-size:15px;">📊 大盤觀點</h3>
+  <h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;font-size:15px;">📊 市場觀點</h3>
   <div style="background:{dot_bg};border-radius:8px;padding:12px 16px;margin-bottom:25px;display:flex;align-items:center;gap:10px;">
     <span style="background:{mkt_color};color:#fff;padding:3px 10px;border-radius:12px;font-size:13px;font-weight:bold;white-space:nowrap;">● {sentiment}</span>
     <span style="font-size:15px;color:#2c3e50;">{market.get('summary','')}</span>
@@ -399,19 +397,19 @@ def generate_html_email(data):
       <span style="background:{cat_color};color:#fff;font-size:11px;padding:2px 8px;border-radius:4px;">{news.get('category','')}</span>
     </div>
     <p style="margin:0 0 5px;font-size:13px;color:#666;line-height:1.5;"><b style="color:#555;">事件：</b>{news.get('event','')}</p>
-    <p style="margin:0;font-size:13px;color:#2c3e50;line-height:1.5;"><b>深度解析：</b>{news.get('view','')}</p>
+    <p style="margin:0;font-size:13px;color:#2c3e50;line-height:1.5;"><b>市場解讀：</b>{news.get('view','')}</p>
   </div>"""
 
     # 個股標的
     if data.get('stocks'):
-        html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">📈 標的動態</h3>"""
+        html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">📈 個股觀點</h3>"""
         for stock in data['stocks']:
             s         = stock.get('sentiment','觀望')
             s_color   = {"看多":"#27ae60","看空":"#c0392b"}.get(s,"#f39c12")
             s_bg      = {"看多":"#eaf6ee","看空":"#fdecea"}.get(s,"#fef9ec")
             risk      = stock.get('risk','')
             r_color   = {"高":"#c0392b","中":"#f39c12","低":"#27ae60"}.get(risk,"#888")
-            ticker    = f" ({stock.get('ticker')})" if stock.get('ticker') else ""
+            ticker    = f"({stock.get('ticker')})" if stock.get('ticker') else ""
             catalyst  = stock.get('catalyst_short') or "—"
             risk_note = stock.get('risk_note')      or "—"
             html += f"""
@@ -419,7 +417,7 @@ def generate_html_email(data):
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
       <div>
         <b style="font-size:16px;color:#2980b9;">{stock.get('name','')}</b>
-        <span style="font-size:12px;color:#999;margin-left:6px;">{ticker.strip()}</span>
+        <span style="font-size:12px;color:#999;margin-left:6px;">{ticker}</span>
         <span style="font-size:11px;color:#aaa;margin-left:4px;">{stock.get('market','')}</span>
       </div>
       <span style="background:{s_color};color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:bold;">{s}</span>
@@ -432,9 +430,9 @@ def generate_html_email(data):
     <p style="margin:0;font-size:13px;line-height:1.6;color:#444;">{stock.get('summary','')}</p>
   </div>"""
 
-    # Q&A
+    # 投資議題
     if data.get('qa'):
-        html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">💼 投資策略與實務探討</h3>"""
+        html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">💼 投資議題探討</h3>"""
         for qa in data['qa']:
             points_html = ""
             for pt in qa.get('points', []):
@@ -452,7 +450,7 @@ def generate_html_email(data):
   </div>"""
 
     html += """
-  <p style="text-align:center;font-size:11px;color:#bbb;margin-top:30px;">投資組合終端・僅供參考不構成投資建議</p>
+  <p style="text-align:center;font-size:11px;color:#bbb;margin-top:30px;">僅供參考，不構成投資建議</p>
 </div>
 </body>
 </html>"""
