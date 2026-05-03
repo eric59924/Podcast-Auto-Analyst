@@ -169,7 +169,7 @@ def analyze_from_transcript(transcript_text, pub_date_raw, episode_no):
     # ✅ 把 RSS 發布日期傳進 prompt，幫助 Gemini 正確填 date 欄位
     date_hint = f"此集 Podcast 的 RSS 發布時間為：{pub_date_raw}，請據此推斷並填入 date 欄位（格式 YYYY-MM-DD）。" if pub_date_raw else ""
 
-   prompt = f"""
+    prompt = f"""
 你是專業的財經內容編輯，請根據以下逐字稿進行分析，用繁體中文輸出，只輸出純 JSON，不含任何說明文字或 markdown 符號。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
