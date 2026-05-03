@@ -228,6 +228,8 @@ def analyze_from_transcript(transcript_text, pub_date_raw, episode_no):
 
 ■ stocks（個股觀點卡片）
   - 只收錄有明確投資論點的個股
+  - 最少收錄 3 檔
+  - 優先順序：主持人花最多時間討論的 > 有明確買賣建議的 > 只有簡單評論的
   - ticker：台股填數字（2330），美股填英文（INTC）
     ⚠️ 台積電=2330，聯發科=2454，已知代號不能填 null
   - market 只能選：台股半導體 / 美股半導體 / 台股網通 / 台股其他 / 美股其他
