@@ -36,66 +36,44 @@ UNRESTRICTED_SAFETY = [
 ]
 
 # =========================
-# 📡 模組 1：抓取最新 RSS
+# 📡 模組 1：抓取最新 RSS (使用 cloudscraper 繞過 Cloudflare)
 # =========================
 def get_latest_episode_from_rss(rss_url):
-    print("📡 正在抓取 RSS...")
+    print("📡 正在抓取 RSS (使用 cloudscraper 繞過防火牆)...")
+    
+    import cloudscraper
+    # 建立一個具有真實瀏覽器特徵的 scraper
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
+    )
 
-    # ✅ 模擬真實 Podcast App，S3 不會擋這類 UA
-    podcast_agents = [
-        "Overcast/3.0 (+http://overcast.fm/; iOS podcast app)",
-        "PocketCasts/7.0",
-        "AppleCoreMedia/1.0.0.18G82 (iPhone; U; CPU iPhone OS 14_7 like Mac OS X)",
-        "Castro/2022 (iOS 15.0)",
-    ]
+    try:
+        # 直接去抓原本的網址，不需要透過任何第三方代理
+        r = scraper.get(rss_url, timeout=30)
+        print(f"   狀態碼：{r.status_code}")
 
-    # ✅ 同時試多個代理服務
-    encoded = requests.utils.quote(rss_url, safe='')
-    sources = [
-        # 直接抓，用 Podcast App UA
-        {"name": "direct_overcast",    "url": rss_url,                                              "ua": podcast_agents[0], "is_proxy": False},
-        {"name": "direct_pocketcasts", "url": rss_url,                                              "ua": podcast_agents[1], "is_proxy": False},
-        {"name": "direct_apple",       "url": rss_url,                                              "ua": podcast_agents[2], "is_proxy": False},
-        # 代理服務
-        {"name": "corsproxy",          "url": f"https://corsproxy.io/?{encoded}",                   "ua": "Mozilla/5.0",     "is_proxy": True},
-        {"name": "codetabs",           "url": f"https://api.codetabs.com/v1/proxy?quest={encoded}", "ua": "Mozilla/5.0",     "is_proxy": True},
-        {"name": "allorigins_raw",     "url": f"https://api.allorigins.win/raw?url={encoded}",      "ua": "Mozilla/5.0",     "is_proxy": True},
-    ]
+        if r.status_code != 200:
+            raise Exception(f"❌ 抓取失敗，狀態碼不是 200 ({r.status_code})")
 
-    xml_content = None
-
-    for src in sources:
-        try:
-            print(f"   嘗試：{src['name']}...")
-            r = requests.get(
-                src["url"],
-                timeout=20,
-                headers={"User-Agent": src["ua"]},
-                allow_redirects=True
-            )
-            print(f"   狀態碼：{r.status_code}")
-
-            if r.status_code != 200:
-                continue
-
-            content = r.text
-            if "<item>" in content or "<entry>" in content:
-                print(f"   ✅ {src['name']} 成功")
-                xml_content = content
-                break
-            else:
-                print(f"   {src['name']} 回傳內容不含 RSS 項目")
-
-        except Exception as e:
-            print(f"   {src['name']} 失敗：{e}")
-            continue
-
-    if not xml_content:
-        raise Exception("❌ 所有方式均失敗，請見上方 log")
+        xml_content = r.text
+        if "<item>" not in xml_content and "<entry>" not in xml_content:
+            print("原始內容前 300 字：", xml_content[:300])
+            raise Exception("❌ 成功連線，但回傳內容不含 RSS 項目 (可能遇到驗證碼挑戰)")
+            
+    except Exception as e:
+        raise Exception(f"❌ 抓取過程發生錯誤: {e}")
 
     # 解析 XML
     root         = ET.fromstring(xml_content)
     latest_item  = root.find('.//channel/item')
+    
+    if latest_item is None:
+        raise Exception("❌ XML 解析失敗，找不到 <item> 節點")
+        
     title        = latest_item.find('title').text
     mp3_url      = latest_item.find('enclosure').attrib['url']
     pub_date_raw = latest_item.findtext('pubDate', default='')
