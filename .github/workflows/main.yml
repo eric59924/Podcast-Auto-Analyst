@@ -53,7 +53,7 @@ jobs:
           MP3_URL:        ${{ github.event.client_payload.mp3_url     || github.event.inputs.mp3_url }}
           PUB_DATE:       ${{ github.event.client_payload.pub_date    || github.event.inputs.pub_date }}
           FORCE_RERUN:    ${{ github.event.client_payload.force_rerun || github.event.inputs.force_rerun || 'false' }}
-        run: python main.py
+        run: python main_html.py
 
       - name: 存回紀錄
         uses: stefanzweifel/git-auto-commit-action@v5
