@@ -21,7 +21,7 @@ SENDER_EMAIL    = os.environ.get("GMAIL_USER")
 APP_PASSWORD    = os.environ.get("GMAIL_PASS")
 RECEIVER_EMAIL  = os.environ.get("EMAIL_TO", SENDER_EMAIL)
 FORCE_RERUN     = os.environ.get("FORCE_RERUN", "false").lower() == "true"
-SITE_TITLE      = os.environ.get("SITE_TITLE", "股癌筆記")
+SITE_TITLE      = os.environ.get("SITE_TITLE", "股市筆記")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -760,7 +760,7 @@ def main():
     # 寄信
     print("📧 寄送 Email...")
     email_html = generate_html_email(parsed, episode_no)
-    subject    = f"股癌 {episode_no} | {parsed.get('title', episode_no)}"
+    subject    = f" {episode_no} | {parsed.get('title', episode_no)}"
     send_email(email_html, subject)
 
     # 更新網站
