@@ -207,7 +207,7 @@ def analyze_from_transcript(transcript_text, pub_date_raw, episode_no):
   - 點出本次最大市場亮點
 
 ■ intro（導讀）
-  - 150-200字，財經媒體「本週市場摘要」的語氣
+  - 500字，財經媒體「本週市場摘要」的語氣
   - 結構：市場背景 → 核心話題 → 投資議題概覽
   - 不提任何 podcast 相關字眼
 
@@ -227,19 +227,29 @@ def analyze_from_transcript(transcript_text, pub_date_raw, episode_no):
     ❌ 「我覺得這個影響很大」
 
 ■ stocks（個股觀點卡片）
-  - 只收錄有明確投資論點的個股
+  - 被提及的個股/產業族群都要收錄
   - 最少收錄 3 檔
   - 優先順序：主持人花最多時間討論的 > 有明確買賣建議的 > 只有簡單評論的
   - ticker：台股填數字（2330），美股填英文（INTC）
     ⚠️ 台積電=2330，聯發科=2454，已知代號不能填 null
   - market 只能選：台股半導體 / 美股半導體 / 台股網通 / 台股其他 / 美股其他
-  - summary：200字以內
+  - summary：4-6句詳細analysis
     (a) 看多/觀望/看空的核心理由
     (b) 短線觀察重點
     (c) 主要風險
   - catalyst_short：10字以內，若無填 null
   - risk_note：15字以內，最具體的風險描述
-
+  
+■ host_disclosure（主持人持倉揭露）★★★ 最重要
+  - 只收錄主持人明確提到「自己」的操作，不包含建議聽眾的內容
+  - action 只能填：持有 / 已買入 / 已出清 / 加碼中 / 考慮買入 / 考慮出清
+  - 若本集完全沒有提到自身持倉，輸出空陣列 []
+  - note：主持人說的原話或操作理由，原文語氣，30字以內
+  - 範例：
+    ✅ 「已買入，等待 Google 訂單量級確認後加碼」
+    ✅ 「持有，利多出盡前不動」
+    ❌ 「建議大家可以買」（這是建議聽眾，不算持倉揭露）
+    
 ■ qa（投資議題探討卡片）
   - title：15字以內，聳動有畫面感
     ✅ 「3000萬本金你會怎麼配置？」
@@ -298,6 +308,15 @@ def analyze_from_transcript(transcript_text, pub_date_raw, episode_no):
     }}
   ],
 
+  "host_disclosure": [
+    {{
+      "name": "股票中文名稱",
+      "ticker": "代號或null",
+      "action": "持有|已買入|已出清|加碼中|考慮買入|考慮出清",
+      "note": "操作理由或原話，30字以內"
+    }}
+  ],
+  
   "qa": [
     {{
       "title": "聳動標題15字以內",
@@ -432,6 +451,37 @@ def generate_html_email(data):
     <p style="margin:0;font-size:13px;line-height:1.6;color:#444;">{stock.get('summary','')}</p>
   </div>"""
 
+    # 主持人持倉揭露
+    if data.get('host_disclosure'):
+        html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">🔍 持倉揭露</h3>"""
+        html += """<div style="background:#fffbf0;border:1.5px solid #f39c12;border-radius:8px;padding:14px;margin-bottom:12px;">"""
+        html += """<p style="margin:0 0 10px;font-size:12px;color:#e67e22;font-weight:bold;">⚠️ 以下為分析師本人實際操作揭露，僅供參考</p>"""
+        
+        for disc in data['host_disclosure']:
+            action = disc.get('action', '')
+            action_color = {
+                "已買入":   "#27ae60",
+                "加碼中":   "#27ae60",
+                "考慮買入": "#2980b9",
+                "持有":     "#7f8c8d",
+                "考慮出清": "#e67e22",
+                "已出清":   "#c0392b",
+            }.get(action, "#7f8c8d")
+            
+            ticker = f"({disc.get('ticker')})" if disc.get('ticker') else ""
+            
+            html += f"""
+  <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid #f0e6c8;">
+    <span style="background:{action_color};color:#fff;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:bold;white-space:nowrap;flex-shrink:0;">{action}</span>
+    <div>
+      <b style="font-size:14px;color:#2c3e50;">{disc.get('name','')}</b>
+      <span style="font-size:12px;color:#999;margin-left:5px;">{ticker}</span>
+      <p style="margin:3px 0 0;font-size:13px;color:#555;line-height:1.5;">{disc.get('note','')}</p>
+    </div>
+  </div>"""
+        
+        html += """</div>"""
+    
     # 投資議題
     if data.get('qa'):
         html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">💼 投資議題探討</h3>"""
