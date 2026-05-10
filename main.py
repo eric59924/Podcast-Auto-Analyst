@@ -3,11 +3,13 @@ import re
 import sys
 import time
 import json
+import html as html_lib
 import requests
 import smtplib
-import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import parsedate_to_datetime
 from google import genai
 from google.genai import types
 
@@ -17,16 +19,21 @@ from google.genai import types
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY")
 SENDER_EMAIL    = os.environ.get("GMAIL_USER")
 APP_PASSWORD    = os.environ.get("GMAIL_PASS")
-RECEIVER_EMAIL  = os.environ.get("EMAIL_TO", SENDER_EMAIL)   # 若沒設定 EMAIL_TO，寄給自己
+RECEIVER_EMAIL  = os.environ.get("EMAIL_TO", SENDER_EMAIL)
 FORCE_RERUN     = os.environ.get("FORCE_RERUN", "false").lower() == "true"
+SITE_TITLE      = os.environ.get("SITE_TITLE", "股癌筆記")
 
-client  = genai.Client(api_key=GEMINI_API_KEY)
-RSS_URL = "https://open.firstory.me/rss/user/ck7t2i2ncqopi0873tqaimwq1"
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 儲存路徑（這些會被 commit 回 GitHub）
-OUTPUT_DIR    = "output"
-HISTORY_FILE  = "last_ep.txt"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# 儲存路徑
+OUTPUT_DIR        = "output"
+SITE_DIR          = "site"
+SITE_EPISODES_DIR = os.path.join(SITE_DIR, "episodes")
+SITE_DATA_DIR     = os.path.join(SITE_DIR, "data")
+HISTORY_FILE      = "last_ep.txt"
+
+for d in (OUTPUT_DIR, SITE_DIR, SITE_EPISODES_DIR, SITE_DATA_DIR):
+    os.makedirs(d, exist_ok=True)
 
 UNRESTRICTED_SAFETY = [
     types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,       threshold=types.HarmBlockThreshold.BLOCK_NONE),
@@ -36,168 +43,24 @@ UNRESTRICTED_SAFETY = [
 ]
 
 # =========================
-# 📡 模組 1：抓取最新集數 (iTunes → RSS → Proxy 三層備援)
-# =========================
-import re
-import requests
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
-
-RSS_URL = "https://open.firstory.me/rss/user/ck7t2i2ncqopi0873tqaimwq1"
-APPLE_PODCAST_ID = "1500833611"  # 股癌
-
-
-def _parse_rss_xml(xml_content):
-    """從 RSS XML 抽出最新一集 (episode_no, title, mp3_url, pub_date_raw)。"""
-    root = ET.fromstring(xml_content)
-    items = root.findall('.//channel/item')
-    if not items:
-        raise Exception("RSS 沒有任何 <item>")
-
-    # 依 pubDate 排序，最新優先（避免 RSS 順序錯亂）
-    def _pub_key(it):
-        try:
-            return parsedate_to_datetime(it.findtext('pubDate', default=''))
-        except Exception:
-            return None
-    sortable = [it for it in items if _pub_key(it) is not None]
-    if sortable:
-        sortable.sort(key=_pub_key, reverse=True)
-        latest = sortable[0]
-    else:
-        latest = items[0]
-
-    title        = (latest.findtext('title') or "").strip()
-    enclosure    = latest.find('enclosure')
-    mp3_url      = enclosure.attrib.get('url', '') if enclosure is not None else ''
-    pub_date_raw = latest.findtext('pubDate', default='').strip()
-
-    if not mp3_url:
-        raise Exception("RSS 內找不到 enclosure mp3 連結")
-
-    match      = re.search(r"(EP\d+)", title, re.IGNORECASE)
-    episode_no = match.group(1).upper() if match else "LATEST_EP"
-    return episode_no, title, mp3_url, pub_date_raw
-
-
-def _try_apple_itunes():
-    """方案 1：Apple iTunes Lookup API。"""
-    print("🔎 [1/3] 嘗試 Apple iTunes API...")
-    api_url = (
-        f"https://itunes.apple.com/lookup?id={APPLE_PODCAST_ID}"
-        "&entity=podcastEpisode&limit=20&sort=recent"
-    )
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    r = requests.get(api_url, headers=headers, timeout=20)
-    if r.status_code != 200:
-        raise Exception(f"Apple API 狀態碼 {r.status_code}")
-
-    data    = r.json()
-    results = data.get("results", []) or []
-    # ✅ 只挑「集數」型別，避免抓到節目本身
-    episodes = [x for x in results if x.get("wrapperType") == "podcastEpisode"]
-    if not episodes:
-        raise Exception(f"Apple API 沒有 podcastEpisode（resultCount={data.get('resultCount')}）")
-
-    # 依 releaseDate 取最新
-    def _rel(x):
-        return x.get("releaseDate") or ""
-    episodes.sort(key=_rel, reverse=True)
-    latest = episodes[0]
-
-    title        = latest.get("trackName", "")
-    mp3_url      = latest.get("episodeUrl", "")
-    pub_date_raw = latest.get("releaseDate", "")
-    if not mp3_url:
-        raise Exception("Apple API 回傳的集數缺 episodeUrl")
-
-    match      = re.search(r"(EP\d+)", title, re.IGNORECASE)
-    episode_no = match.group(1).upper() if match else "LATEST_EP"
-    return episode_no, title, mp3_url, pub_date_raw
-
-
-def _try_direct_rss():
-    """方案 2：直抓 RSS（用 Podcast App User-Agent，避開 S3 防火牆）。"""
-    print("🔎 [2/3] 嘗試直抓 RSS...")
-    podcast_uas = [
-        "Overcast/3.0 (+http://overcast.fm/; iOS podcast app)",
-        "PocketCasts/7.0",
-        "AppleCoreMedia/1.0.0.18G82 (iPhone; U; CPU iPhone OS 14_7 like Mac OS X)",
-        "Castro/2022 (iOS 15.0)",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
-    ]
-    last_err = None
-    for ua in podcast_uas:
-        try:
-            r = requests.get(RSS_URL, headers={"User-Agent": ua}, timeout=20, allow_redirects=True)
-            if r.status_code == 200 and ("<item>" in r.text or "<entry>" in r.text):
-                print(f"   ✅ 直抓成功 (UA: {ua.split('/')[0]})")
-                return _parse_rss_xml(r.text)
-            last_err = f"{ua.split('/')[0]} 狀態碼 {r.status_code}"
-        except Exception as e:
-            last_err = f"{ua.split('/')[0]} → {e}"
-    raise Exception(f"直抓 RSS 全部失敗（最後錯誤：{last_err}）")
-
-
-def _try_proxy_rss():
-    """方案 3：透過代理服務抓 RSS（避開封鎖）。"""
-    print("🔎 [3/3] 嘗試代理服務...")
-    encoded = requests.utils.quote(RSS_URL, safe='')
-    proxies = [
-        ("corsproxy",      f"https://corsproxy.io/?{encoded}"),
-        ("codetabs",       f"https://api.codetabs.com/v1/proxy?quest={encoded}"),
-        ("allorigins_raw", f"https://api.allorigins.win/raw?url={encoded}"),
-    ]
-    last_err = None
-    for name, url in proxies:
-        try:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
-            if r.status_code == 200 and ("<item>" in r.text or "<entry>" in r.text):
-                print(f"   ✅ {name} 成功")
-                return _parse_rss_xml(r.text)
-            last_err = f"{name} 狀態碼 {r.status_code}"
-        except Exception as e:
-            last_err = f"{name} → {e}"
-    raise Exception(f"代理服務全部失敗（最後錯誤：{last_err}）")
-
-
-def get_latest_episode_from_rss(rss_url_ignored=None):
-    """三層備援，回傳 (episode_no, title, mp3_url, pub_date_raw)。"""
-    print("📡 開始抓取最新集數...")
-    errors = []
-    for fn in (_try_apple_itunes, _try_direct_rss, _try_proxy_rss):
-        try:
-            episode_no, title, mp3_url, pub_date_raw = fn()
-            print(f"✅ 集數：{episode_no}  |  發布：{pub_date_raw}")
-            print(f"   標題：{title}")
-            return episode_no, title, mp3_url, pub_date_raw
-        except Exception as e:
-            print(f"   ⚠️ {fn.__name__} 失敗：{e}")
-            errors.append(f"{fn.__name__}: {e}")
-    raise Exception("❌ 三種方案全部失敗：\n  - " + "\n  - ".join(errors))
-    
-# =========================
-# 📝 模組 2：音檔 → 逐字稿
+# 📝 模組 1：音檔 → 逐字稿
 # =========================
 def get_full_transcript(mp3_path, episode_no):
-    # ✅ 快取：若已有逐字稿就直接讀取，不重新跑 Gemini
     txt_path = os.path.join(OUTPUT_DIR, f"{episode_no}_transcript.txt")
     if os.path.exists(txt_path):
-        print(f"⚡ 逐字稿快取命中，直接讀取：{txt_path}")
+        print(f"⚡ 逐字稿快取命中：{txt_path}")
         with open(txt_path, "r", encoding="utf-8") as f:
             return f.read()
 
-    print("☁️ 正在上傳音檔至 Google 伺服器...")
+    print("☁️ 上傳音檔至 Google...")
     audio_file = client.files.upload(file=mp3_path)
-
     while audio_file.state.name == "PROCESSING":
         time.sleep(5)
         audio_file = client.files.get(name=audio_file.name)
-
     if audio_file.state.name == "FAILED":
-        raise ValueError("❌ 音檔處理失敗！")
+        raise ValueError("❌ 音檔處理失敗")
 
-    print("✍️ 開始產生逐字稿...")
+    print("✍️ 產生逐字稿...")
     prompt = (
         "請根據這段音檔，整理出一份完整的繁體中文逐字稿。"
         "要求：盡可能一字不漏，加上標點符號與適當分段。"
@@ -207,176 +70,158 @@ def get_full_transcript(mp3_path, episode_no):
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=[audio_file, prompt],
-        config=types.GenerateContentConfig(safety_settings=UNRESTRICTED_SAFETY)
+        config=types.GenerateContentConfig(safety_settings=UNRESTRICTED_SAFETY),
     )
     client.files.delete(name=audio_file.name)
-
     transcript = response.text.strip()
 
-    # ✅ 儲存逐字稿（會被 commit 回 GitHub 永久保存）
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(transcript)
     print(f"💾 逐字稿已儲存：{txt_path}")
-
     return transcript
 
 
 # =========================
-# 🧠 模組 3：逐字稿 → JSON 分析
+# 🧠 模組 2：逐字稿 → JSON 分析
 # =========================
 def analyze_from_transcript(transcript_text, pub_date_raw, episode_no):
-    # ✅ 快取：若已有分析結果就直接讀取
     json_path = os.path.join(OUTPUT_DIR, f"{episode_no}_analysis.json")
     if os.path.exists(json_path) and not FORCE_RERUN:
-        print(f"⚡ 分析快取命中，直接讀取：{json_path}")
+        print(f"⚡ 分析快取命中：{json_path}")
         with open(json_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    print("🧠 正在根據逐字稿進行結構化分析...")
-
-    # ✅ 把 RSS 發布日期傳進 prompt，幫助 Gemini 正確填 date 欄位
-    date_hint = f"此集 Podcast 的 RSS 發布時間為：{pub_date_raw}，請據此推斷並填入 date 欄位（格式 YYYY-MM-DD）。" if pub_date_raw else ""
+    print("🧠 結構化分析中...")
+    date_hint = (
+        f"此集 RSS 發布時間為：{pub_date_raw}，請據此推斷並填入 date 欄位（格式 YYYY-MM-DD）。"
+        if pub_date_raw else ""
+    )
 
     prompt = f"""
-你是專業的股市投資人。
-請根據以下逐字稿進行分析，用繁體中文輸出，只輸出純 JSON，不含任何說明文字或 markdown 符號。
+你是專業的財經內容編輯，請根據以下逐字稿進行分析，用繁體中文輸出，只輸出純 JSON，不含任何說明文字或 markdown 符號。
 {date_hint}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-【STEP 1｜段落識別】
+【STEP 1｜內容過濾】
 ━━━━━━━━━━━━━━━━━━━━━━━━
-此 Podcast 固定四段結構：
-① 葉配（業配廣告）      → 完全忽略
-② 生活分享（日常閒聊）  → 完全忽略
-③ 股市市場話題          → 核心，逐則完整分析
-④ Q&A                  → 只保留投資相關提問
+逐字稿包含以下四段，請依規則處理：
+① 業配廣告    → 完全忽略
+② 日常閒聊    → 完全忽略
+③ 股市市場話題 → 核心，完整分析
+④ Q&A        → 只保留投資相關內容
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-【STEP 2｜欄位規則（請逐條遵守）】
+【STEP 2｜語氣與用字規範】
+━━━━━━━━━━━━━━━━━━━━━━━━
+✅ 應使用：客觀、第三人稱的財經媒體語氣（「分析師認為」「市場觀點」「據悉」「值得關注」）
+❌ 絕對不能出現：主持人、來賓、節目、本集、集數、聽眾、podcast、節目中、本期、這集、上集、下集、時間戳記、分鐘數、來源標記
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+【STEP 3｜欄位規則】
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-■ episode
-  - 從逐字稿中主持人說的集數、節目標題或開場白擷取
-  - 格式：EP + 數字，如 EP657
-  - 若完全找不到填 null
-
-■ date
-  - 優先使用上方提供的 RSS 發布時間
-  - 格式：YYYY-MM-DD
-  - 若完全找不到填 null
-
-■ title
-  - 本集最能代表內容的標題，20字以內
-  - 像財經媒體的文章標題，點出最大亮點
-
-■ intro（導讀）
-  - 只摘要「股市話題」+「投資相關Q&A」的內容
-  - 完全不提葉配與生活分享
-  - 150-200字，語氣像節目官方介紹文案
-  - 結構：市場背景 → 本集核心話題 → Q&A主軸
+■ date：YYYY-MM-DD，無法判斷填 null
+■ title：20字內財經頭條
+■ intro：500字市場摘要（市場背景→核心話題→投資議題概覽），不提任何 podcast 相關字眼
 
 ■ market_view
   - sentiment 只能填：看多 / 看空 / 中性
-  - summary：主持人對整體市場最核心的一句話判斷，20字以內
-    ✅ 好例子：「搶錢行情，多頭應咬住漲幅不縮手」
-    ❌ 壞例子：「大盤進入混沌局面，類股輪動快速，資金流向難判斷」（太模糊）
+  - summary：20字以內市場核心判斷
+    ✅ 「資金回流科技股，多頭格局持續確立」
 
-■ news（新聞卡片）
-  - 每個獨立話題/個股討論 = 一張卡，不要合併
-  - title：8字以內，像報紙斗大標題，要有衝擊感
-    ✅ 「台積電外資大賣壓」「Intel封裝良率衝90%」
-    ❌ 「Meta簽AWS Graviton」（太像技術術語，不像標題）
+■ news（市場事件卡片）
+  - 每個獨立事件 = 一張卡，不合併
+  - title：8字以內，報紙斗大標題風格
   - category 只能選：台股 / 美股 / 半導體 / 總經 / 其他
-  - event：客觀陳述發生什麼事，不含主觀評價，2句
-  - view：主持人的解讀與看法，保留他的語氣與個性，2-3句
-    （他慣用「我覺得」「說實在」「這個角度來看」等語氣）
+  - event：客觀陳述事件本身，2句，只有事實
+  - view：市場分析觀點，2-3句，第三人稱客觀語氣
 
-■ stocks（個股卡片）
-  - 只收錄主持人明確給出投資論點的個股，純路過提及不算
-  - ticker：台股填數字代號（如 2330），美股填英文（如 INTC）
-    ⚠️ 台積電 = 2330，聯發科 = 2454，絕對不能填 null
-    若真的不知道代號才填 null
+■ stocks（個股觀點卡片）
+  - 被提及的個股/產業族群都要收錄，最少 3 檔
+  - 優先順序：討論最多 > 有明確建議 > 簡單評論
+  - ticker：台股填數字（2330），美股填英文（INTC）
+    ⚠️ 台積電=2330，聯發科=2454，已知代號不能填 null
   - market 只能選：台股半導體 / 美股半導體 / 台股網通 / 台股其他 / 美股其他
-  - summary：200字以內，包含：
-    (a) 主持人看多/觀望/看空的主要理由
-    (b) 短線觀察重點
-    (c) 最大風險提示
-  - catalyst_short：10字以內的短線催化劑，若無填 null
-  - risk_note：15字以內，最具體的一個風險
+  - summary：4-6句詳細分析，含(a)核心理由(b)短線觀察(c)風險
+  - catalyst_short：10字以內，若無填 null
+  - risk_note：15字以內，最具體的風險描述
 
-■ qa（Q&A卡片）
-  - title：15字以內，要聳動、有畫面感、讓人想點開
-    ✅ 「長輩廢話不如直接送錢」「3000萬本金你會怎麼玩？」
-    ❌ 「主動型ETF能打敗巴菲特魔咒？」（太學術）
-  - question：精煉聽眾問題為1-2句話的核心提問
-    ⚠️ 不要把逐字稿整段貼上，要整理成乾淨的問題
-  - points：3-4個重點，每個 label 4字以內（像小標題）
-  - quote：主持人最精華金句，原文照錄
-    必須是有哲理、有衝擊感、能獨立成句的話
+■ host_disclosure（持倉揭露）★★★ 最重要
+  - 只收錄分析師本人明確提到「自己」的操作，不包含對外建議
+  - action 只能填：持有 / 已買入 / 已出清 / 加碼中 / 考慮買入 / 考慮出清
+  - note：操作理由或原話，30字以內，保留原文語氣
+  - 若完全沒提到自身持倉，輸出空陣列 []
+    ✅ 「已買入，等待訂單量級確認後加碼」
+    ❌ 「建議大家可以買」（這是建議，不算持倉揭露）
+
+■ qa（投資議題探討卡片）
+  - title：15字以內，聳動有畫面感
+    ✅ 「3000萬本金你會怎麼配置？」
+  - question：精煉為1-2句核心提問
+  - points：3-4個重點，label 4字以內
+  - quote：最具代表性的觀點金句，20-40字，有哲理或衝擊感
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-【STEP 3｜Q&A 過濾標準（嚴格執行）】
+【STEP 4｜Q&A 過濾標準】
 ━━━━━━━━━━━━━━━━━━━━━━━━
-✅ 納入：選股/持股/賣股時機、個股產業看法、投資心法、倉位管理、槓桿維持率、總經判斷
-❌ 跳過：純生活問題、與金融無關的個人意見、問題不明確且主持人未給出投資建議
+✅ 納入：選股持股賣股、個股產業看法、投資心法、倉位管理、槓桿維持率、總經判斷
+❌ 跳過：純生活問題、與投資無關的個人意見
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 【輸出 JSON 結構】
 ━━━━━━━━━━━━━━━━━━━━━━━━
 {{
-  "episode": "EP657",
   "date": "YYYY-MM-DD 或 null",
-  "title": "本集標題20字以內",
-  "segment_map": {{
-    "葉配":     "約第X-Y分鐘，若無填null",
-    "生活分享": "約第X-Y分鐘",
-    "股市話題": "約第X-Y分鐘",
-    "QA":       "約第X-Y分鐘"
-  }},
-  "intro": "150-200字導讀，只含投資內容",
+  "title": "財經頭條20字以內",
+  "intro": "500字市場摘要",
   "market_view": {{
     "sentiment": "看多|看空|中性",
-    "summary": "20字以內，有力的一句話"
+    "summary": "20字以內市場核心判斷"
   }},
   "news": [
     {{
-      "title": "8字以內衝擊標題",
+      "title": "8字以內事件標題",
       "category": "台股|美股|半導體|總經|其他",
-      "source_range": "如 12-13",
-      "event": "客觀事件2句，只有事實",
-      "view": "主持人觀點2-3句，保留語氣個性"
+      "event": "客觀事件描述2句",
+      "view": "市場分析觀點2-3句，第三人稱"
     }}
   ],
   "stocks": [
     {{
       "name": "股票中文名稱",
-      "ticker": "2330 或 INTC",
+      "ticker": "代號",
       "market": "台股半導體|美股半導體|台股網通|台股其他|美股其他",
       "sentiment": "看多|觀望|看空",
       "risk": "低|中|高",
-      "source_range": "如 12-13",
-      "summary": "200字以內，含看法理由+觀察重點+風險",
+      "summary": "4-6句投資論點",
       "catalyst_short": "10字以內或null",
-      "risk_note": "15字以內最具體的風險",
+      "risk_note": "15字以內具體風險",
       "price": null,
       "rsi": null,
       "change_1m": null,
       "pe": null,
-      "holding": "持倉損益百分比或null"
+      "holding": null
+    }}
+  ],
+  "host_disclosure": [
+    {{
+      "name": "股票中文名稱",
+      "ticker": "代號或null",
+      "action": "持有|已買入|已出清|加碼中|考慮買入|考慮出清",
+      "note": "操作理由或原話，30字以內"
     }}
   ],
   "qa": [
     {{
       "title": "聳動標題15字以內",
-      "source_range": "如 29-31",
-      "question": "精煉後的核心提問1-2句",
+      "question": "精煉核心提問1-2句",
       "points": [
         {{
           "label": "4字標籤",
-          "content": "說明2-3句"
+          "content": "說明2-3句，客觀語氣"
         }}
       ],
-      "quote": "有衝擊感的金句原文20-40字"
+      "quote": "精華觀點金句20-40字"
     }}
   ]
 }}
@@ -391,14 +236,13 @@ def analyze_from_transcript(transcript_text, pub_date_raw, episode_no):
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             temperature=0.2,
-            safety_settings=UNRESTRICTED_SAFETY
-        )
+            safety_settings=UNRESTRICTED_SAFETY,
+        ),
     )
 
-    # ✅ 防呆：移除可能的 markdown 包裝再解析
-    raw  = response.text.strip()
-    raw  = re.sub(r"^```(?:json)?", "", raw, flags=re.IGNORECASE).strip()
-    raw  = re.sub(r"```$", "", raw).strip()
+    raw = response.text.strip()
+    raw = re.sub(r"^```(?:json)?", "", raw, flags=re.IGNORECASE).strip()
+    raw = re.sub(r"```$", "", raw).strip()
 
     try:
         parsed = json.loads(raw)
@@ -407,55 +251,44 @@ def analyze_from_transcript(transcript_text, pub_date_raw, episode_no):
         print("原始內容前 300 字：", raw[:300])
         raise
 
-    # ✅ 儲存 JSON（會被 commit 回 GitHub 永久保存）
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(parsed, f, ensure_ascii=False, indent=2)
     print(f"💾 分析結果已儲存：{json_path}")
-
     return parsed
 
 
 # =========================
-# 💌 模組 4：JSON → HTML Email
+# 💌 模組 3：JSON → HTML Email
 # =========================
-def generate_html_email(data):
-    episode_str = data.get('episode') or ""
-    date_str    = data.get('date')    or "最新市場快訊"
-    title_str   = data.get('title')   or "市場重點整理"
-
-    header_label = f"{episode_str}  {date_str}".strip() if episode_str else date_str
+def generate_html_email(data, episode_no):
+    date_str  = data.get('date') or "最新市場快訊"
+    title_str = data.get('title') or "市場重點整理"
 
     html = f"""
 <html>
 <body style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;background:#f4f7f9;padding:20px;color:#333;">
 <div style="max-width:650px;margin:auto;background:#fff;padding:30px;border-radius:12px;box-shadow:0 4px 15px rgba(0,0,0,.05);">
-
-  <!-- Header -->
   <div style="border-bottom:2px solid #eee;padding-bottom:15px;margin-bottom:20px;">
-    <span style="background:#3498db;color:#fff;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:13px;">{header_label}</span>
+    <span style="background:#3498db;color:#fff;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:13px;">{date_str}</span>
     <h2 style="margin:10px 0 0;color:#2c3e50;font-size:20px;">{title_str}</h2>
   </div>
-
-  <!-- 導讀 -->
   <div style="background:#f8f9fa;border-left:4px solid #f39c12;padding:15px;border-radius:4px;margin-bottom:25px;">
-    <h4 style="margin:0 0 8px;color:#f39c12;font-size:14px;">💡 核心摘要</h4>
+    <h4 style="margin:0 0 8px;color:#f39c12;font-size:14px;">💡 本週市場摘要</h4>
     <p style="margin:0;line-height:1.7;font-size:14px;color:#555;">{data.get('intro','')}</p>
   </div>
 """
-
     # 大盤觀點
-    market      = data.get('market_view', {})
-    sentiment   = market.get('sentiment', '中性')
-    mkt_color   = {"看多": "#27ae60", "看空": "#c0392b"}.get(sentiment, "#7f8c8d")
-    dot_bg      = {"看多": "#eaf6ee", "看空": "#fdecea"}.get(sentiment, "#f0f0f0")
+    market    = data.get('market_view', {})
+    sentiment = market.get('sentiment', '中性')
+    mkt_color = {"看多": "#27ae60", "看空": "#c0392b"}.get(sentiment, "#7f8c8d")
+    dot_bg    = {"看多": "#eaf6ee", "看空": "#fdecea"}.get(sentiment, "#f0f0f0")
     html += f"""
-  <h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;font-size:15px;">📊 大盤觀點</h3>
+  <h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;font-size:15px;">📊 市場觀點</h3>
   <div style="background:{dot_bg};border-radius:8px;padding:12px 16px;margin-bottom:25px;display:flex;align-items:center;gap:10px;">
     <span style="background:{mkt_color};color:#fff;padding:3px 10px;border-radius:12px;font-size:13px;font-weight:bold;white-space:nowrap;">● {sentiment}</span>
     <span style="font-size:15px;color:#2c3e50;">{market.get('summary','')}</span>
   </div>
 """
-
     # 市場事件
     if data.get('news'):
         html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">📰 市場事件與解析</h3>"""
@@ -469,27 +302,27 @@ def generate_html_email(data):
       <span style="background:{cat_color};color:#fff;font-size:11px;padding:2px 8px;border-radius:4px;">{news.get('category','')}</span>
     </div>
     <p style="margin:0 0 5px;font-size:13px;color:#666;line-height:1.5;"><b style="color:#555;">事件：</b>{news.get('event','')}</p>
-    <p style="margin:0;font-size:13px;color:#2c3e50;line-height:1.5;"><b>深度解析：</b>{news.get('view','')}</p>
+    <p style="margin:0;font-size:13px;color:#2c3e50;line-height:1.5;"><b>市場解讀：</b>{news.get('view','')}</p>
   </div>"""
 
-    # 個股標的
+    # 個股觀點
     if data.get('stocks'):
-        html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">📈 標的動態</h3>"""
+        html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">📈 個股觀點</h3>"""
         for stock in data['stocks']:
             s         = stock.get('sentiment','觀望')
             s_color   = {"看多":"#27ae60","看空":"#c0392b"}.get(s,"#f39c12")
             s_bg      = {"看多":"#eaf6ee","看空":"#fdecea"}.get(s,"#fef9ec")
             risk      = stock.get('risk','')
             r_color   = {"高":"#c0392b","中":"#f39c12","低":"#27ae60"}.get(risk,"#888")
-            ticker    = f" ({stock.get('ticker')})" if stock.get('ticker') else ""
+            ticker    = f"({stock.get('ticker')})" if stock.get('ticker') else ""
             catalyst  = stock.get('catalyst_short') or "—"
-            risk_note = stock.get('risk_note')      or "—"
+            risk_note = stock.get('risk_note') or "—"
             html += f"""
   <div style="border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:12px;background:{s_bg}08;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
       <div>
         <b style="font-size:16px;color:#2980b9;">{stock.get('name','')}</b>
-        <span style="font-size:12px;color:#999;margin-left:6px;">{ticker.strip()}</span>
+        <span style="font-size:12px;color:#999;margin-left:6px;">{ticker}</span>
         <span style="font-size:11px;color:#aaa;margin-left:4px;">{stock.get('market','')}</span>
       </div>
       <span style="background:{s_color};color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:bold;">{s}</span>
@@ -502,9 +335,36 @@ def generate_html_email(data):
     <p style="margin:0;font-size:13px;line-height:1.6;color:#444;">{stock.get('summary','')}</p>
   </div>"""
 
-    # Q&A
+    # ★★★ 持倉揭露
+    if data.get('host_disclosure'):
+        html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">🔍 持倉揭露</h3>"""
+        html += """<div style="background:#fffbf0;border:1.5px solid #f39c12;border-radius:8px;padding:14px;margin-bottom:12px;">"""
+        html += """<p style="margin:0 0 10px;font-size:12px;color:#e67e22;font-weight:bold;">⚠️ 以下為分析師本人實際操作揭露，僅供參考</p>"""
+        for disc in data['host_disclosure']:
+            action = disc.get('action', '')
+            action_color = {
+                "已買入":   "#27ae60",
+                "加碼中":   "#27ae60",
+                "考慮買入": "#2980b9",
+                "持有":     "#7f8c8d",
+                "考慮出清": "#e67e22",
+                "已出清":   "#c0392b",
+            }.get(action, "#7f8c8d")
+            ticker = f"({disc.get('ticker')})" if disc.get('ticker') else ""
+            html += f"""
+  <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid #f0e6c8;">
+    <span style="background:{action_color};color:#fff;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:bold;white-space:nowrap;flex-shrink:0;">{action}</span>
+    <div>
+      <b style="font-size:14px;color:#2c3e50;">{disc.get('name','')}</b>
+      <span style="font-size:12px;color:#999;margin-left:5px;">{ticker}</span>
+      <p style="margin:3px 0 0;font-size:13px;color:#555;line-height:1.5;">{disc.get('note','')}</p>
+    </div>
+  </div>"""
+        html += """</div>"""
+
+    # 投資議題
     if data.get('qa'):
-        html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">💼 投資策略與實務探討</h3>"""
+        html += """<h3 style="color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:5px;margin-top:25px;font-size:15px;">💼 投資議題探討</h3>"""
         for qa in data['qa']:
             points_html = ""
             for pt in qa.get('points', []):
@@ -522,7 +382,7 @@ def generate_html_email(data):
   </div>"""
 
     html += """
-  <p style="text-align:center;font-size:11px;color:#bbb;margin-top:30px;">投資組合終端・僅供參考不構成投資建議</p>
+  <p style="text-align:center;font-size:11px;color:#bbb;margin-top:30px;">僅供參考，不構成投資建議</p>
 </div>
 </body>
 </html>"""
@@ -530,7 +390,7 @@ def generate_html_email(data):
 
 
 # =========================
-# 📤 模組 5：寄信
+# 📤 模組 4：寄信
 # =========================
 def send_email(html_content, subject_title):
     print("📧 正在連線至 Gmail 寄信...")
@@ -539,7 +399,6 @@ def send_email(html_content, subject_title):
     msg['From']    = SENDER_EMAIL
     msg['To']      = RECEIVER_EMAIL
     msg.attach(MIMEText(html_content, 'html'))
-
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(SENDER_EMAIL, APP_PASSWORD)
@@ -551,56 +410,367 @@ def send_email(html_content, subject_title):
 
 
 # =========================
+# 🌐 模組 5：JSON → 靜態網站
+# =========================
+def _esc(x):
+    return html_lib.escape("" if x is None else str(x), quote=True)
+
+def _format_pub_date(pub_date_raw):
+    if not pub_date_raw:
+        return ""
+    try:
+        dt = parsedate_to_datetime(pub_date_raw)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    except Exception:
+        return pub_date_raw
+
+CSS = """
+*{box-sizing:border-box}
+body{font-family:'Helvetica Neue',Helvetica,Arial,'PingFang TC','Microsoft JhengHei',sans-serif;background:#f4f7f9;color:#333;margin:0}
+.topbar{display:flex;justify-content:space-between;align-items:center;padding:14px 24px;background:#fff;border-bottom:1px solid #e8e8e8;position:sticky;top:0;z-index:10}
+.brand{font-weight:700;color:#2c3e50;text-decoration:none;font-size:16px}
+.ep-tag{background:#3498db;color:#fff;padding:3px 10px;border-radius:4px;font-weight:bold;font-size:13px}
+.container{max-width:780px;margin:24px auto;padding:0 20px 60px}
+.home-title{margin:0 0 16px;color:#2c3e50}
+.search{width:100%;padding:10px 14px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-bottom:20px}
+.ep-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.ep-card{display:block;background:#fff;border-radius:10px;padding:16px;text-decoration:none;color:inherit;border:1px solid #eee;transition:transform .15s,box-shadow .15s}
+.ep-card:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(0,0,0,.06)}
+.ep-card-head{display:flex;justify-content:space-between;font-size:12px;color:#888;margin-bottom:8px}
+.ep-num{background:#ecf0f1;padding:2px 8px;border-radius:4px;color:#2c3e50;font-weight:bold}
+.ep-card h3{margin:6px 0;font-size:15px;color:#2c3e50;line-height:1.4}
+.ep-intro{font-size:12px;color:#777;line-height:1.5;margin:6px 0}
+.ep-card-foot{display:flex;align-items:center;gap:8px;margin-top:8px}
+.ep-card.bull{border-top:3px solid #27ae60}.ep-card.bear{border-top:3px solid #c0392b}.ep-card.neutral{border-top:3px solid #7f8c8d}
+.ep-header{border-bottom:2px solid #eee;padding-bottom:14px;margin-bottom:20px}
+.date-pill{background:#3498db;color:#fff;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:13px}
+.ep-header h1{margin:10px 0 0;color:#2c3e50;font-size:22px}
+.intro-box{background:#fff8e7;border-left:4px solid #f39c12;padding:14px 16px;border-radius:4px;margin-bottom:24px}
+.intro-box h4{margin:0 0 6px;color:#f39c12;font-size:14px}
+.intro-box p{margin:0;line-height:1.7;font-size:14px;color:#555}
+.section-title{color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:6px;margin-top:28px;font-size:15px}
+.market-row{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:8px;margin-bottom:20px}
+.market-row.bull{background:#eaf6ee}.market-row.bear{background:#fdecea}.market-row.neutral{background:#f0f0f0}
+.market-summary{font-size:15px;color:#2c3e50}
+.badge{color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:bold;background:#7f8c8d}
+.badge.bull{background:#27ae60}.badge.bear{background:#c0392b}.badge.watch{background:#f39c12}.badge.neutral{background:#7f8c8d}
+.badge.cat-tw{background:#2980b9}.badge.cat-us{background:#8e44ad}.badge.cat-semi{background:#16a085}
+.badge.cat-macro{background:#c0392b}.badge.cat-other{background:#7f8c8d}
+.card{background:#fff;border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:12px}
+.card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.card.news p{margin:0 0 5px;font-size:13px;line-height:1.5;color:#555}
+.muted{color:#888;font-size:12px}
+.card.stock.bull{background:#f5fbf6}.card.stock.bear{background:#fdf6f6}.card.stock.watch{background:#fefaf2}
+.stock-name{font-size:16px;color:#2980b9}
+.ticker{font-size:12px;color:#999;margin-left:6px}
+.market-tag{font-size:11px;color:#aaa;margin-left:4px}
+.chips{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.chip{background:#f1f2f6;padding:3px 8px;border-radius:4px;font-size:12px;color:#555}
+.chip.risk-high b{color:#c0392b}.chip.risk-mid b{color:#f39c12}.chip.risk-low b{color:#27ae60}
+.stock-summary{margin:0;font-size:13px;line-height:1.6;color:#444}
+.disclosure-box{background:#fffbf0;border:1.5px solid #f39c12;border-radius:8px;padding:14px;margin-bottom:12px}
+.disclosure-warning{margin:0 0 10px;font-size:12px;color:#e67e22;font-weight:bold}
+.disclosure-row{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid #f0e6c8}
+.disclosure-row:last-child{border-bottom:none}
+.disc-action{color:#fff;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:bold;white-space:nowrap;flex-shrink:0}
+.disc-action.buy,.disc-action.add{background:#27ae60}
+.disc-action.consider-buy{background:#2980b9}
+.disc-action.hold{background:#7f8c8d}
+.disc-action.consider-sell{background:#e67e22}
+.disc-action.sold{background:#c0392b}
+.disc-name{font-size:14px;color:#2c3e50;font-weight:bold}
+.disc-ticker{font-size:12px;color:#999;margin-left:5px}
+.disc-note{margin:3px 0 0;font-size:13px;color:#555;line-height:1.5}
+.card.qa h4{margin:0 0 8px;color:#8e44ad;font-size:14px}
+.qa-question{background:#f5f0ff;border-left:3px solid #9b59b6;padding:8px 12px;border-radius:0 6px 6px 0;margin-bottom:10px}
+.qa-question p{margin:0;font-size:13px;color:#555;font-style:italic}
+.point{margin:0 0 6px;font-size:13px;line-height:1.55;color:#444}
+.point b{color:#2c3e50}
+.qa-quote{margin-top:10px;padding:10px 14px;background:#fdf2e9;border-radius:6px;text-align:center;color:#d35400;font-size:14px}
+.disclaimer{text-align:center;font-size:11px;color:#bbb;margin-top:30px}
+"""
+
+def write_site_assets():
+    asset_dir = os.path.join(SITE_DIR, "assets")
+    os.makedirs(asset_dir, exist_ok=True)
+    with open(os.path.join(asset_dir, "style.css"), "w", encoding="utf-8") as f:
+        f.write(CSS)
+
+def render_episode_page(data):
+    episode  = data.get("episode", "")
+    date_str = data.get("date") or _format_pub_date(data.get("pub_date")) or "未知日期"
+    title    = data.get("title") or "市場重點整理"
+
+    parts = [f"""<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_esc(episode)} {_esc(title)} | {_esc(SITE_TITLE)}</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">← {_esc(SITE_TITLE)}</a>
+  <span class="ep-tag">{_esc(episode)}</span>
+</header>
+<main class="container">
+  <div class="ep-header">
+    <span class="date-pill">{_esc(date_str)}</span>
+    <h1>{_esc(title)}</h1>
+  </div>
+  <section class="intro-box">
+    <h4>💡 本週市場摘要</h4>
+    <p>{_esc(data.get('intro',''))}</p>
+  </section>
+"""]
+
+    market    = data.get("market_view") or {}
+    sentiment = market.get("sentiment", "中性")
+    s_class   = {"看多": "bull", "看空": "bear"}.get(sentiment, "neutral")
+    parts.append(f"""
+  <h3 class="section-title">📊 市場觀點</h3>
+  <div class="market-row {s_class}">
+    <span class="badge {s_class}">● {_esc(sentiment)}</span>
+    <span class="market-summary">{_esc(market.get('summary',''))}</span>
+  </div>
+""")
+
+    if data.get("news"):
+        parts.append('<h3 class="section-title">📰 市場事件與解析</h3>')
+        for n in data["news"]:
+            cat = n.get("category", "")
+            cat_class = {"台股":"cat-tw","美股":"cat-us","半導體":"cat-semi","總經":"cat-macro"}.get(cat, "cat-other")
+            parts.append(f"""
+  <article class="card news">
+    <div class="card-head">
+      <b>📌 {_esc(n.get('title',''))}</b>
+      <span class="badge {cat_class}">{_esc(cat)}</span>
+    </div>
+    <p><b class="muted">事件：</b>{_esc(n.get('event',''))}</p>
+    <p><b>市場解讀：</b>{_esc(n.get('view',''))}</p>
+  </article>""")
+
+    if data.get("stocks"):
+        parts.append('<h3 class="section-title">📈 個股觀點</h3>')
+        for s in data["stocks"]:
+            sent       = s.get("sentiment", "觀望")
+            sent_class = {"看多":"bull","看空":"bear"}.get(sent, "watch")
+            risk       = s.get("risk", "")
+            risk_class = {"高":"risk-high","中":"risk-mid","低":"risk-low"}.get(risk, "")
+            ticker     = f"({_esc(s.get('ticker'))})" if s.get("ticker") else ""
+            parts.append(f"""
+  <article class="card stock {sent_class}">
+    <div class="card-head">
+      <div>
+        <b class="stock-name">{_esc(s.get('name',''))}</b>
+        <span class="ticker">{ticker}</span>
+        <span class="market-tag">{_esc(s.get('market',''))}</span>
+      </div>
+      <span class="badge {sent_class}">{_esc(sent)}</span>
+    </div>
+    <div class="chips">
+      <span class="chip {risk_class}">⚠️ 風險：<b>{_esc(risk) or '—'}</b></span>
+      <span class="chip">🚀 催化劑：{_esc(s.get('catalyst_short') or '—')}</span>
+      <span class="chip">🛡️ 風險點：{_esc(s.get('risk_note') or '—')}</span>
+    </div>
+    <p class="stock-summary">{_esc(s.get('summary',''))}</p>
+  </article>""")
+
+    if data.get("host_disclosure"):
+        parts.append('<h3 class="section-title">🔍 持倉揭露</h3>')
+        parts.append('<div class="disclosure-box">')
+        parts.append('<p class="disclosure-warning">⚠️ 以下為分析師本人實際操作揭露，僅供參考</p>')
+        action_class_map = {
+            "已買入":"buy","加碼中":"add","考慮買入":"consider-buy",
+            "持有":"hold","考慮出清":"consider-sell","已出清":"sold",
+        }
+        for disc in data["host_disclosure"]:
+            action = disc.get("action", "")
+            ac     = action_class_map.get(action, "hold")
+            ticker = f"({_esc(disc.get('ticker'))})" if disc.get("ticker") else ""
+            parts.append(f"""
+  <div class="disclosure-row">
+    <span class="disc-action {ac}">{_esc(action)}</span>
+    <div>
+      <b class="disc-name">{_esc(disc.get('name',''))}</b>
+      <span class="disc-ticker">{ticker}</span>
+      <p class="disc-note">{_esc(disc.get('note',''))}</p>
+    </div>
+  </div>""")
+        parts.append('</div>')
+
+    if data.get("qa"):
+        parts.append('<h3 class="section-title">💼 投資議題探討</h3>')
+        for qa in data["qa"]:
+            pts = "".join(
+                f'<p class="point">• <b>{_esc(p.get("label",""))}：</b>{_esc(p.get("content",""))}</p>'
+                for p in qa.get("points", [])
+            )
+            parts.append(f"""
+  <article class="card qa">
+    <h4>💬 {_esc(qa.get('title',''))}</h4>
+    <div class="qa-question"><p>{_esc(qa.get('question',''))}</p></div>
+    {pts}
+    <div class="qa-quote"><b>「{_esc(qa.get('quote',''))}」</b></div>
+  </article>""")
+
+    parts.append("""
+  <p class="disclaimer">僅供參考，不構成投資建議</p>
+</main>
+</body>
+</html>""")
+    return "".join(parts)
+
+def render_index_page(episodes):
+    cards = []
+    for ep in episodes:
+        sentiment = ep.get("sentiment") or "中性"
+        s_class   = {"看多":"bull","看空":"bear"}.get(sentiment, "neutral")
+        cards.append(f"""
+    <a class="ep-card {s_class}" href="episodes/{_esc(ep['episode'])}.html">
+      <div class="ep-card-head">
+        <span class="ep-num">{_esc(ep['episode'])}</span>
+        <span class="ep-date">{_esc(ep.get('date') or '')}</span>
+      </div>
+      <h3>{_esc(ep.get('title',''))}</h3>
+      <p class="ep-intro">{_esc((ep.get('intro') or '')[:120])}…</p>
+      <div class="ep-card-foot">
+        <span class="badge {s_class}">● {_esc(sentiment)}</span>
+        <span class="muted">{_esc(ep.get('market_summary',''))}</span>
+      </div>
+    </a>""")
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_esc(SITE_TITLE)}</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="topbar">
+  <span class="brand">{_esc(SITE_TITLE)}</span>
+  <span class="muted">{len(episodes)} 集</span>
+</header>
+<main class="container">
+  <h1 class="home-title">所有集數</h1>
+  <input id="search" class="search" type="search" placeholder="搜尋集數、標題或關鍵字...">
+  <div class="ep-grid">{"".join(cards)}</div>
+</main>
+<script>
+  const q = document.getElementById('search');
+  q.addEventListener('input', () => {{
+    const t = q.value.trim().toLowerCase();
+    document.querySelectorAll('.ep-card').forEach(c => {{
+      c.style.display = c.innerText.toLowerCase().includes(t) ? '' : 'none';
+    }});
+  }});
+</script>
+</body>
+</html>"""
+
+def build_index():
+    items = []
+    for fname in os.listdir(OUTPUT_DIR):
+        if not fname.endswith("_analysis.json"):
+            continue
+        try:
+            with open(os.path.join(OUTPUT_DIR, fname), "r", encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            continue
+        ep = d.get("episode") or fname.replace("_analysis.json", "")
+        items.append({
+            "episode":        ep,
+            "date":           d.get("date") or _format_pub_date(d.get("pub_date")) or "",
+            "title":          d.get("title", ""),
+            "intro":          d.get("intro", ""),
+            "sentiment":      (d.get("market_view") or {}).get("sentiment", "中性"),
+            "market_summary": (d.get("market_view") or {}).get("summary", ""),
+        })
+    def ep_key(x):
+        m = re.search(r"\d+", x.get("episode", ""))
+        return int(m.group(0)) if m else 0
+    items.sort(key=ep_key, reverse=True)
+    with open(os.path.join(SITE_DATA_DIR, "episodes.json"), "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(SITE_DIR, "index.html"), "w", encoding="utf-8") as f:
+        f.write(render_index_page(items))
+
+def build_episode_page(data):
+    episode   = data.get("episode", "EP")
+    html_path = os.path.join(SITE_EPISODES_DIR, f"{episode}.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(render_episode_page(data))
+    return html_path
+
+
+# =========================
 # 🚀 主流水線
 # =========================
 def main():
     print("🔥 啟動全自動分析流水線...")
     print(f"   FORCE_RERUN = {FORCE_RERUN}")
 
-    # 1. 抓取最新集數（含發布日期）
-    episode_no, rss_title, mp3_url, pub_date_raw = get_latest_episode_from_rss(RSS_URL)
+    # ✅ 一律從 GAS 傳入的環境變數讀取，不自己抓 RSS
+    episode_no   = os.environ.get("EPISODE_NO", "").strip()
+    mp3_url      = os.environ.get("MP3_URL", "").strip()
+    pub_date_raw = os.environ.get("PUB_DATE", "").strip()
 
-    # 2. 防重複：已處理過且非強制重跑 → 直接結束
+    if not episode_no or not mp3_url:
+        print("❌ 缺少 EPISODE_NO 或 MP3_URL，請確認 GAS 有正確傳入資料")
+        sys.exit(1)
+
+    print(f"📻 集數：{episode_no}  |  發布：{pub_date_raw}")
+
+    # 防重複
     last_ep = ""
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE, "r") as f:
             last_ep = f.read().strip()
-
     if episode_no == last_ep and not FORCE_RERUN:
-        print(f"⏭️  {episode_no} 已處理過，本次略過（傳入 FORCE_RERUN=true 可強制重跑）")
+        print(f"⏭️  {episode_no} 已處理過，略過（FORCE_RERUN=true 可強制重跑）")
         sys.exit(0)
 
-    print(f"🆕 發現新集數：{episode_no}，開始處理...")
-
-    # 3. 下載 MP3（使用 cffi_requests 避免被阻擋）
+    # 下載 MP3
     mp3_path = os.path.join(OUTPUT_DIR, f"{episode_no}.mp3")
     if not os.path.exists(mp3_path):
         print(f"⬇️ 下載 {episode_no}.mp3 ...")
-        from curl_cffi import requests as cffi_requests
-        
-        # 抓取音檔 (GitHub 記憶體很大，我們直接一次性寫入，避免 stream 斷線問題)
-        r = cffi_requests.get(mp3_url, impersonate="chrome116", timeout=180)
+        r = requests.get(mp3_url, stream=True, timeout=180,
+                         headers={"User-Agent": "Mozilla/5.0"})
         with open(mp3_path, "wb") as f:
-            f.write(r.content)
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
         print("✅ MP3 下載完成")
     else:
-        print("⚡ MP3 已存在，跳過下載")
+        print("⚡ MP3 已存在")
 
-    # 4. 音檔 → 逐字稿（有快取）
+    # 逐字稿
     transcript = get_full_transcript(mp3_path, episode_no)
     if len(transcript) < 100:
-        raise ValueError("❌ 逐字稿內容太短，可能辨識失敗")
+        raise ValueError("❌ 逐字稿太短，可能辨識失敗")
 
-    # 5. 逐字稿 → JSON 分析（有快取）
-    parsed_data = analyze_from_transcript(transcript, pub_date_raw, episode_no)
+    # 分析
+    parsed = analyze_from_transcript(transcript, pub_date_raw, episode_no)
+    parsed.setdefault("episode", episode_no)
 
-    # 6. 渲染 HTML 並寄信
-    print("🎨 渲染 Email...")
-    email_html   = generate_html_email(parsed_data)
-    subject      = f"股癌 {parsed_data.get('episode', episode_no)} | {parsed_data.get('title', rss_title)}"
+    # 寄信
+    print("📧 寄送 Email...")
+    email_html = generate_html_email(parsed, episode_no)
+    subject    = f"股癌 {episode_no} | {parsed.get('title', episode_no)}"
     send_email(email_html, subject)
 
-    # 7. 更新歷史紀錄（這個檔案會被 commit 回 GitHub）
+    # 更新網站
+    print("🎨 產生網站頁面...")
+    write_site_assets()
+    page_path = build_episode_page(parsed)
+    build_index()
+    print(f"📄 集數頁面：{page_path}")
+    print(f"🏠 首頁：{os.path.join(SITE_DIR, 'index.html')}")
+
+    # 更新歷史
     with open(HISTORY_FILE, "w") as f:
         f.write(episode_no)
     print(f"🎉 {episode_no} 全部完成！")
