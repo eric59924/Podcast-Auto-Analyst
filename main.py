@@ -36,24 +36,17 @@ UNRESTRICTED_SAFETY = [
 ]
 
 # =========================
-# 📡 模組 1：抓取最新 RSS (使用 cloudscraper 繞過 Cloudflare)
+# 📡 模組 1：抓取最新 RSS (使用 curl_cffi 完美模擬真實瀏覽器)
 # =========================
 def get_latest_episode_from_rss(rss_url):
-    print("📡 正在抓取 RSS (使用 cloudscraper 繞過防火牆)...")
+    print("📡 正在抓取 RSS (啟動底層指紋偽裝)...")
     
-    import cloudscraper
-    # 建立一個具有真實瀏覽器特徵的 scraper
-    scraper = cloudscraper.create_scraper(
-        browser={
-            'browser': 'chrome',
-            'platform': 'windows',
-            'desktop': True
-        }
-    )
+    # 引入最強黑科技 curl_cffi
+    from curl_cffi import requests as cffi_requests
 
     try:
-        # 直接去抓原本的網址，不需要透過任何第三方代理
-        r = scraper.get(rss_url, timeout=30)
+        # impersonate="chrome116" 會完美偽裝成 Chrome 116 的網路指紋
+        r = cffi_requests.get(rss_url, impersonate="chrome116", timeout=30)
         print(f"   狀態碼：{r.status_code}")
 
         if r.status_code != 200:
@@ -62,7 +55,7 @@ def get_latest_episode_from_rss(rss_url):
         xml_content = r.text
         if "<item>" not in xml_content and "<entry>" not in xml_content:
             print("原始內容前 300 字：", xml_content[:300])
-            raise Exception("❌ 成功連線，但回傳內容不含 RSS 項目 (可能遇到驗證碼挑戰)")
+            raise Exception("❌ 成功連線，但回傳內容不含 RSS 項目 (可能遇到圖形驗證碼)")
             
     except Exception as e:
         raise Exception(f"❌ 抓取過程發生錯誤: {e}")
@@ -484,14 +477,16 @@ def main():
 
     print(f"🆕 發現新集數：{episode_no}，開始處理...")
 
-    # 3. 下載 MP3（暫存於 GitHub Actions runner，用完即消失）
+    # 3. 下載 MP3（使用 cffi_requests 避免被阻擋）
     mp3_path = os.path.join(OUTPUT_DIR, f"{episode_no}.mp3")
     if not os.path.exists(mp3_path):
         print(f"⬇️ 下載 {episode_no}.mp3 ...")
-        r = requests.get(mp3_url, stream=True, timeout=120)
+        from curl_cffi import requests as cffi_requests
+        
+        # 抓取音檔 (GitHub 記憶體很大，我們直接一次性寫入，避免 stream 斷線問題)
+        r = cffi_requests.get(mp3_url, impersonate="chrome116", timeout=180)
         with open(mp3_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
+            f.write(r.content)
         print("✅ MP3 下載完成")
     else:
         print("⚡ MP3 已存在，跳過下載")
