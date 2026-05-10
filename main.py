@@ -38,46 +38,41 @@ UNRESTRICTED_SAFETY = [
 # =========================
 # 📡 模組 1：抓取最新 RSS (使用 curl_cffi 完美模擬真實瀏覽器)
 # =========================
-def get_latest_episode_from_rss(rss_url):
-    print("📡 正在抓取 RSS (啟動底層指紋偽裝)...")
+# =========================
+# 📡 模組 1：抓取最新集數 (使用 Apple Podcasts API 完美繞過防火牆)
+# =========================
+def get_latest_episode_from_rss(rss_url_ignored):
+    print("📡 正在向 Apple 伺服器請求最新集數 (啟動終極繞過方案)...")
     
-    # 引入最強黑科技 curl_cffi
-    from curl_cffi import requests as cffi_requests
-
-    try:
-        # impersonate="chrome116" 會完美偽裝成 Chrome 116 的網路指紋
-        r = cffi_requests.get(rss_url, impersonate="chrome116", timeout=30)
-        print(f"   狀態碼：{r.status_code}")
-
-        if r.status_code != 200:
-            raise Exception(f"❌ 抓取失敗，狀態碼不是 200 ({r.status_code})")
-
-        xml_content = r.text
-        if "<item>" not in xml_content and "<entry>" not in xml_content:
-            print("原始內容前 300 字：", xml_content[:300])
-            raise Exception("❌ 成功連線，但回傳內容不含 RSS 項目 (可能遇到圖形驗證碼)")
-            
-    except Exception as e:
-        raise Exception(f"❌ 抓取過程發生錯誤: {e}")
-
-    # 解析 XML
-    root         = ET.fromstring(xml_content)
-    latest_item  = root.find('.//channel/item')
+    # 股癌 (Gooaye) 的 Apple Podcast 專屬 ID 是 1500833611
+    # 透過 entity=podcastEpisode&limit=1 直接拿最新一集
+    api_url = "https://itunes.apple.com/lookup?id=1500833611&entity=podcastEpisode&limit=1"
     
-    if latest_item is None:
-        raise Exception("❌ XML 解析失敗，找不到 <item> 節點")
+    # Apple API 很友善，普通的 requests 就能輕鬆取得
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    response = requests.get(api_url, headers=headers, timeout=20)
+    
+    if response.status_code != 200:
+        raise Exception(f"❌ Apple API 抓取失敗，狀態碼: {response.status_code}")
         
-    title        = latest_item.find('title').text
-    mp3_url      = latest_item.find('enclosure').attrib['url']
-    pub_date_raw = latest_item.findtext('pubDate', default='')
-
-    if not mp3_url:
-        raise Exception("❌ 找不到 MP3 連結")
-
-    match      = re.search(r"(EP\d+)", title, re.IGNORECASE)
+    data = response.json()
+    
+    # resultCount 至少要有 2 (第0筆是節目資訊，第1筆才是最新一集)
+    if data.get("resultCount", 0) < 2:
+        raise Exception("❌ 找不到最新的集數資料")
+        
+    latest_item = data["results"][1]
+    
+    title = latest_item.get("trackName", "")
+    mp3_url = latest_item.get("episodeUrl", "")
+    pub_date_raw = latest_item.get("releaseDate", "")
+    
+    # 萃取 EP 編號
+    match = re.search(r"(EP\d+)", title, re.IGNORECASE)
     episode_no = match.group(1).upper() if match else "LATEST_EP"
-
-    print(f"✅ 集數：{episode_no}  |  發布時間：{pub_date_raw}")
+    
+    print(f"✅ 發現最新集數：{episode_no}  |  發布時間：{pub_date_raw}")
+    
     return episode_no, title, mp3_url, pub_date_raw
 
 
