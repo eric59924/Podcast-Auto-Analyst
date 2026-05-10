@@ -46,7 +46,7 @@ def get_latest_episode_from_rss(rss_url_ignored):
     
     # 股癌 (Gooaye) 的 Apple Podcast 專屬 ID 是 1500833611
     # 透過 entity=podcastEpisode&limit=1 直接拿最新一集
-    api_url = "https://itunes.apple.com/lookup?id=1500833611&entity=podcastEpisode&limit=1"
+    api_url = "https://itunes.apple.com/lookup?id=1500833611&entity=podcastEpisode&limit=5"
     
     # Apple API 很友善，普通的 requests 就能輕鬆取得
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
