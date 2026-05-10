@@ -1,0 +1,62 @@
+name: Podcast Auto Analyst
+
+on:
+  repository_dispatch:
+    types: [new_episode]
+
+  workflow_dispatch:
+    inputs:
+      episode_no:
+        description: '集數編號，如 EP657'
+        required: false
+        default: ''
+      mp3_url:
+        description: 'MP3 網址'
+        required: false
+        default: ''
+      pub_date:
+        description: '發布日期'
+        required: false
+        default: ''
+      force_rerun:
+        description: '強制重新分析'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: '3.11'
+
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+
+      - name: 執行分析
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_USER:     ${{ secrets.GMAIL_USER }}
+          GMAIL_PASS:     ${{ secrets.GMAIL_PASS }}
+          EMAIL_TO:       ${{ secrets.EMAIL_TO }}
+          EPISODE_NO:     ${{ github.event.client_payload.episode_no  || github.event.inputs.episode_no }}
+          MP3_URL:        ${{ github.event.client_payload.mp3_url     || github.event.inputs.mp3_url }}
+          PUB_DATE:       ${{ github.event.client_payload.pub_date    || github.event.inputs.pub_date }}
+          FORCE_RERUN:    ${{ github.event.client_payload.force_rerun || github.event.inputs.force_rerun || 'false' }}
+        run: python mail_html.py
+
+      - name: 存回紀錄
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto update: processed episode"
+          file_pattern: 'last_ep.txt output/*.txt output/*.json'
