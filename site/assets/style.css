@@ -1,0 +1,64 @@
+
+*{box-sizing:border-box}
+body{font-family:'Helvetica Neue',Helvetica,Arial,'PingFang TC','Microsoft JhengHei',sans-serif;background:#f4f7f9;color:#333;margin:0}
+.topbar{display:flex;justify-content:space-between;align-items:center;padding:14px 24px;background:#fff;border-bottom:1px solid #e8e8e8;position:sticky;top:0;z-index:10}
+.brand{font-weight:700;color:#2c3e50;text-decoration:none;font-size:16px}
+.ep-tag{background:#3498db;color:#fff;padding:3px 10px;border-radius:4px;font-weight:bold;font-size:13px}
+.container{max-width:780px;margin:24px auto;padding:0 20px 60px}
+.home-title{margin:0 0 16px;color:#2c3e50}
+.search{width:100%;padding:10px 14px;border:1px solid #ddd;border-radius:8px;font-size:14px;margin-bottom:20px}
+.ep-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.ep-card{display:block;background:#fff;border-radius:10px;padding:16px;text-decoration:none;color:inherit;border:1px solid #eee;transition:transform .15s,box-shadow .15s}
+.ep-card:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(0,0,0,.06)}
+.ep-card-head{display:flex;justify-content:space-between;font-size:12px;color:#888;margin-bottom:8px}
+.ep-num{background:#ecf0f1;padding:2px 8px;border-radius:4px;color:#2c3e50;font-weight:bold}
+.ep-card h3{margin:6px 0;font-size:15px;color:#2c3e50;line-height:1.4}
+.ep-intro{font-size:12px;color:#777;line-height:1.5;margin:6px 0}
+.ep-card-foot{display:flex;align-items:center;gap:8px;margin-top:8px}
+.ep-card.bull{border-top:3px solid #27ae60}
+.ep-card.bear{border-top:3px solid #c0392b}
+.ep-card.neutral{border-top:3px solid #7f8c8d}
+
+.ep-header{border-bottom:2px solid #eee;padding-bottom:14px;margin-bottom:20px}
+.date-pill{background:#3498db;color:#fff;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:13px}
+.ep-header h1{margin:10px 0 0;color:#2c3e50;font-size:22px}
+
+.intro-box{background:#fff8e7;border-left:4px solid #f39c12;padding:14px 16px;border-radius:4px;margin-bottom:24px}
+.intro-box h4{margin:0 0 6px;color:#f39c12;font-size:14px}
+.intro-box p{margin:0;line-height:1.7;font-size:14px;color:#555}
+
+.section-title{color:#2c3e50;border-bottom:1px solid #eee;padding-bottom:6px;margin-top:28px;font-size:15px}
+
+.market-row{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:8px;margin-bottom:20px}
+.market-row.bull{background:#eaf6ee}
+.market-row.bear{background:#fdecea}
+.market-row.neutral{background:#f0f0f0}
+.market-summary{font-size:15px;color:#2c3e50}
+
+.badge{color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:bold;background:#7f8c8d}
+.badge.bull{background:#27ae60}.badge.bear{background:#c0392b}.badge.watch{background:#f39c12}.badge.neutral{background:#7f8c8d}
+.badge.cat-tw{background:#2980b9}.badge.cat-us{background:#8e44ad}.badge.cat-semi{background:#16a085}
+.badge.cat-macro{background:#c0392b}.badge.cat-other{background:#7f8c8d}
+
+.card{background:#fff;border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:12px}
+.card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.card.news p{margin:0 0 5px;font-size:13px;line-height:1.5;color:#555}
+.muted{color:#888;font-size:12px}
+
+.card.stock.bull{background:#f5fbf6}.card.stock.bear{background:#fdf6f6}.card.stock.watch{background:#fefaf2}
+.stock-name{font-size:16px;color:#2980b9}
+.ticker{font-size:12px;color:#999;margin-left:6px}
+.market-tag{font-size:11px;color:#aaa;margin-left:4px}
+.chips{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.chip{background:#f1f2f6;padding:3px 8px;border-radius:4px;font-size:12px;color:#555}
+.chip.risk-high b{color:#c0392b}.chip.risk-mid b{color:#f39c12}.chip.risk-low b{color:#27ae60}
+.stock-summary{margin:0;font-size:13px;line-height:1.6;color:#444}
+
+.card.qa h4{margin:0 0 8px;color:#8e44ad;font-size:14px}
+.qa-question{background:#f5f0ff;border-left:3px solid #9b59b6;padding:8px 12px;border-radius:0 6px 6px 0;margin-bottom:10px}
+.qa-question p{margin:0;font-size:13px;color:#555;font-style:italic}
+.point{margin:0 0 6px;font-size:13px;line-height:1.55;color:#444}
+.point b{color:#2c3e50}
+.qa-quote{margin-top:10px;padding:10px 14px;background:#fdf2e9;border-radius:6px;text-align:center;color:#d35400;font-size:14px}
+
+.disclaimer{text-align:center;font-size:11px;color:#bbb;margin-top:30px}
