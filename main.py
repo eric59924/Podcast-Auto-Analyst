@@ -39,25 +39,74 @@ UNRESTRICTED_SAFETY = [
 # 📡 模組 1：抓取最新 RSS
 # =========================
 def get_latest_episode_from_rss(rss_url):
-    print("📡 正在檢查 Podcast RSS 更新...")
-    headers  = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    response = requests.get(rss_url, headers=headers, timeout=15)
-    if response.status_code != 200:
-        raise Exception(f"RSS 抓取失敗，狀態碼: {response.status_code}")
+    print("📡 正在抓取 RSS...")
 
-    root        = ET.fromstring(response.content)
-    latest_item = root.find('.//channel/item')
+    # ✅ 模擬真實 Podcast App，S3 不會擋這類 UA
+    podcast_agents = [
+        "Overcast/3.0 (+http://overcast.fm/; iOS podcast app)",
+        "PocketCasts/7.0",
+        "AppleCoreMedia/1.0.0.18G82 (iPhone; U; CPU iPhone OS 14_7 like Mac OS X)",
+        "Castro/2022 (iOS 15.0)",
+    ]
 
-    title   = latest_item.find('title').text
-    mp3_url = latest_item.find('enclosure').attrib['url']
+    # ✅ 同時試多個代理服務
+    encoded = requests.utils.quote(rss_url, safe='')
+    sources = [
+        # 直接抓，用 Podcast App UA
+        {"name": "direct_overcast",    "url": rss_url,                                              "ua": podcast_agents[0], "is_proxy": False},
+        {"name": "direct_pocketcasts", "url": rss_url,                                              "ua": podcast_agents[1], "is_proxy": False},
+        {"name": "direct_apple",       "url": rss_url,                                              "ua": podcast_agents[2], "is_proxy": False},
+        # 代理服務
+        {"name": "corsproxy",          "url": f"https://corsproxy.io/?{encoded}",                   "ua": "Mozilla/5.0",     "is_proxy": True},
+        {"name": "codetabs",           "url": f"https://api.codetabs.com/v1/proxy?quest={encoded}", "ua": "Mozilla/5.0",     "is_proxy": True},
+        {"name": "allorigins_raw",     "url": f"https://api.allorigins.win/raw?url={encoded}",      "ua": "Mozilla/5.0",     "is_proxy": True},
+    ]
 
-    # ✅ 新增：從 RSS 擷取發布日期，傳給 Gemini 幫助填 date 欄位
+    xml_content = None
+
+    for src in sources:
+        try:
+            print(f"   嘗試：{src['name']}...")
+            r = requests.get(
+                src["url"],
+                timeout=20,
+                headers={"User-Agent": src["ua"]},
+                allow_redirects=True
+            )
+            print(f"   狀態碼：{r.status_code}")
+
+            if r.status_code != 200:
+                continue
+
+            content = r.text
+            if "<item>" in content or "<entry>" in content:
+                print(f"   ✅ {src['name']} 成功")
+                xml_content = content
+                break
+            else:
+                print(f"   {src['name']} 回傳內容不含 RSS 項目")
+
+        except Exception as e:
+            print(f"   {src['name']} 失敗：{e}")
+            continue
+
+    if not xml_content:
+        raise Exception("❌ 所有方式均失敗，請見上方 log")
+
+    # 解析 XML
+    root         = ET.fromstring(xml_content)
+    latest_item  = root.find('.//channel/item')
+    title        = latest_item.find('title').text
+    mp3_url      = latest_item.find('enclosure').attrib['url']
     pub_date_raw = latest_item.findtext('pubDate', default='')
+
+    if not mp3_url:
+        raise Exception("❌ 找不到 MP3 連結")
 
     match      = re.search(r"(EP\d+)", title, re.IGNORECASE)
     episode_no = match.group(1).upper() if match else "LATEST_EP"
 
-    print(f"   最新集數：{episode_no}  |  發布時間：{pub_date_raw}")
+    print(f"✅ 集數：{episode_no}  |  發布時間：{pub_date_raw}")
     return episode_no, title, mp3_url, pub_date_raw
 
 
