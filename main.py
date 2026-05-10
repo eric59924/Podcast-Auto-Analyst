@@ -36,46 +36,146 @@ UNRESTRICTED_SAFETY = [
 ]
 
 # =========================
-# 📡 模組 1：抓取最新 RSS (使用 curl_cffi 完美模擬真實瀏覽器)
+# 📡 模組 1：抓取最新集數 (iTunes → RSS → Proxy 三層備援)
 # =========================
-# =========================
-# 📡 模組 1：抓取最新集數 (使用 Apple Podcasts API 完美繞過防火牆)
-# =========================
-def get_latest_episode_from_rss(rss_url_ignored):
-    print("📡 正在向 Apple 伺服器請求最新集數 (啟動終極繞過方案)...")
-    
-    # 股癌 (Gooaye) 的 Apple Podcast 專屬 ID 是 1500833611
-    # 透過 entity=podcastEpisode&limit=1 直接拿最新一集
-    api_url = "https://itunes.apple.com/lookup?id=1500833611&entity=podcastEpisode&limit=5"
-    
-    # Apple API 很友善，普通的 requests 就能輕鬆取得
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    response = requests.get(api_url, headers=headers, timeout=20)
-    
-    if response.status_code != 200:
-        raise Exception(f"❌ Apple API 抓取失敗，狀態碼: {response.status_code}")
-        
-    data = response.json()
-    
-    # resultCount 至少要有 2 (第0筆是節目資訊，第1筆才是最新一集)
-    if data.get("resultCount", 0) < 2:
-        raise Exception("❌ 找不到最新的集數資料")
-        
-    latest_item = data["results"][1]
-    
-    title = latest_item.get("trackName", "")
-    mp3_url = latest_item.get("episodeUrl", "")
-    pub_date_raw = latest_item.get("releaseDate", "")
-    
-    # 萃取 EP 編號
-    match = re.search(r"(EP\d+)", title, re.IGNORECASE)
+import re
+import requests
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
+
+RSS_URL = "https://open.firstory.me/rss/user/ck7t2i2ncqopi0873tqaimwq1"
+APPLE_PODCAST_ID = "1500833611"  # 股癌
+
+
+def _parse_rss_xml(xml_content):
+    """從 RSS XML 抽出最新一集 (episode_no, title, mp3_url, pub_date_raw)。"""
+    root = ET.fromstring(xml_content)
+    items = root.findall('.//channel/item')
+    if not items:
+        raise Exception("RSS 沒有任何 <item>")
+
+    # 依 pubDate 排序，最新優先（避免 RSS 順序錯亂）
+    def _pub_key(it):
+        try:
+            return parsedate_to_datetime(it.findtext('pubDate', default=''))
+        except Exception:
+            return None
+    sortable = [it for it in items if _pub_key(it) is not None]
+    if sortable:
+        sortable.sort(key=_pub_key, reverse=True)
+        latest = sortable[0]
+    else:
+        latest = items[0]
+
+    title        = (latest.findtext('title') or "").strip()
+    enclosure    = latest.find('enclosure')
+    mp3_url      = enclosure.attrib.get('url', '') if enclosure is not None else ''
+    pub_date_raw = latest.findtext('pubDate', default='').strip()
+
+    if not mp3_url:
+        raise Exception("RSS 內找不到 enclosure mp3 連結")
+
+    match      = re.search(r"(EP\d+)", title, re.IGNORECASE)
     episode_no = match.group(1).upper() if match else "LATEST_EP"
-    
-    print(f"✅ 發現最新集數：{episode_no}  |  發布時間：{pub_date_raw}")
-    
     return episode_no, title, mp3_url, pub_date_raw
 
 
+def _try_apple_itunes():
+    """方案 1：Apple iTunes Lookup API。"""
+    print("🔎 [1/3] 嘗試 Apple iTunes API...")
+    api_url = (
+        f"https://itunes.apple.com/lookup?id={APPLE_PODCAST_ID}"
+        "&entity=podcastEpisode&limit=20&sort=recent"
+    )
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    r = requests.get(api_url, headers=headers, timeout=20)
+    if r.status_code != 200:
+        raise Exception(f"Apple API 狀態碼 {r.status_code}")
+
+    data    = r.json()
+    results = data.get("results", []) or []
+    # ✅ 只挑「集數」型別，避免抓到節目本身
+    episodes = [x for x in results if x.get("wrapperType") == "podcastEpisode"]
+    if not episodes:
+        raise Exception(f"Apple API 沒有 podcastEpisode（resultCount={data.get('resultCount')}）")
+
+    # 依 releaseDate 取最新
+    def _rel(x):
+        return x.get("releaseDate") or ""
+    episodes.sort(key=_rel, reverse=True)
+    latest = episodes[0]
+
+    title        = latest.get("trackName", "")
+    mp3_url      = latest.get("episodeUrl", "")
+    pub_date_raw = latest.get("releaseDate", "")
+    if not mp3_url:
+        raise Exception("Apple API 回傳的集數缺 episodeUrl")
+
+    match      = re.search(r"(EP\d+)", title, re.IGNORECASE)
+    episode_no = match.group(1).upper() if match else "LATEST_EP"
+    return episode_no, title, mp3_url, pub_date_raw
+
+
+def _try_direct_rss():
+    """方案 2：直抓 RSS（用 Podcast App User-Agent，避開 S3 防火牆）。"""
+    print("🔎 [2/3] 嘗試直抓 RSS...")
+    podcast_uas = [
+        "Overcast/3.0 (+http://overcast.fm/; iOS podcast app)",
+        "PocketCasts/7.0",
+        "AppleCoreMedia/1.0.0.18G82 (iPhone; U; CPU iPhone OS 14_7 like Mac OS X)",
+        "Castro/2022 (iOS 15.0)",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+    ]
+    last_err = None
+    for ua in podcast_uas:
+        try:
+            r = requests.get(RSS_URL, headers={"User-Agent": ua}, timeout=20, allow_redirects=True)
+            if r.status_code == 200 and ("<item>" in r.text or "<entry>" in r.text):
+                print(f"   ✅ 直抓成功 (UA: {ua.split('/')[0]})")
+                return _parse_rss_xml(r.text)
+            last_err = f"{ua.split('/')[0]} 狀態碼 {r.status_code}"
+        except Exception as e:
+            last_err = f"{ua.split('/')[0]} → {e}"
+    raise Exception(f"直抓 RSS 全部失敗（最後錯誤：{last_err}）")
+
+
+def _try_proxy_rss():
+    """方案 3：透過代理服務抓 RSS（避開封鎖）。"""
+    print("🔎 [3/3] 嘗試代理服務...")
+    encoded = requests.utils.quote(RSS_URL, safe='')
+    proxies = [
+        ("corsproxy",      f"https://corsproxy.io/?{encoded}"),
+        ("codetabs",       f"https://api.codetabs.com/v1/proxy?quest={encoded}"),
+        ("allorigins_raw", f"https://api.allorigins.win/raw?url={encoded}"),
+    ]
+    last_err = None
+    for name, url in proxies:
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
+            if r.status_code == 200 and ("<item>" in r.text or "<entry>" in r.text):
+                print(f"   ✅ {name} 成功")
+                return _parse_rss_xml(r.text)
+            last_err = f"{name} 狀態碼 {r.status_code}"
+        except Exception as e:
+            last_err = f"{name} → {e}"
+    raise Exception(f"代理服務全部失敗（最後錯誤：{last_err}）")
+
+
+def get_latest_episode_from_rss(rss_url_ignored=None):
+    """三層備援，回傳 (episode_no, title, mp3_url, pub_date_raw)。"""
+    print("📡 開始抓取最新集數...")
+    errors = []
+    for fn in (_try_apple_itunes, _try_direct_rss, _try_proxy_rss):
+        try:
+            episode_no, title, mp3_url, pub_date_raw = fn()
+            print(f"✅ 集數：{episode_no}  |  發布：{pub_date_raw}")
+            print(f"   標題：{title}")
+            return episode_no, title, mp3_url, pub_date_raw
+        except Exception as e:
+            print(f"   ⚠️ {fn.__name__} 失敗：{e}")
+            errors.append(f"{fn.__name__}: {e}")
+    raise Exception("❌ 三種方案全部失敗：\n  - " + "\n  - ".join(errors))
+    
 # =========================
 # 📝 模組 2：音檔 → 逐字稿
 # =========================
