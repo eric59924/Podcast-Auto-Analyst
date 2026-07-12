@@ -393,22 +393,27 @@ def generate_html_email(data, episode_no):
 # =========================
 # 📤 模組 4：寄信
 # =========================
+
 def send_email(html_content, subject_title):
     print("📧 正在連線至 Gmail 寄信...")
+    
+    # ✅ 支援多個收件人（逗號分隔）
+    receivers = [r.strip() for r in RECEIVER_EMAIL.split(",") if r.strip()]
+    
     msg            = MIMEMultipart()
     msg['Subject'] = f"📊 {subject_title}"
     msg['From']    = SENDER_EMAIL
-    msg['To']      = RECEIVER_EMAIL
+    msg['To']      = ", ".join(receivers)   # ✅ 顯示所有收件人
     msg.attach(MIMEText(html_content, 'html'))
+
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(SENDER_EMAIL, APP_PASSWORD)
-            server.send_message(msg)
-        print(f"✅ 信件已寄出至 {RECEIVER_EMAIL}")
+            server.sendmail(SENDER_EMAIL, receivers, msg.as_string())  # ✅ 實際寄給所有人
+        print(f"✅ 信件已寄出至 {', '.join(receivers)}")
     except Exception as e:
         print(f"❌ 寄信失敗：{e}")
         raise
-
 
 # =========================
 # 🌐 模組 5：JSON → 靜態網站
